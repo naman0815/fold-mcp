@@ -22,7 +22,7 @@ The easiest way to get started: create an empty folder, open Claude Code inside 
 ### 1. Clone and build
 
 ```bash
-git clone https://github.com/naman0815/fold-mcp.git
+git clone https://github.com/naman0815/unfold-mcp.git
 cd fold-mcp
 
 # Build the MCP server
@@ -107,6 +107,7 @@ Once installed, Claude has access to these tools:
 | `get_recent_transactions` | Get the most recent N transactions |
 | `search_transactions` | Filter by merchant, narration, tag, date range, amount, mode, or type |
 | `full_text_search` | Fast FTS5 search across all text fields — finds any word in merchant, narration, or summary |
+| `export_transactions_csv` | Export filtered transactions to a CSV file with category and tags columns |
 
 **Spending analysis**
 
