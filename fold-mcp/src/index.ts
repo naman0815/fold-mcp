@@ -198,11 +198,14 @@ function parseTags(raw: string | null): string[] {
 
 function formatTransaction(t: any): string {
   const tags = parseTags(t.tags);
-  const tagsStr = tags.length > 0 ? ` [Tags: ${tags.join(", ")}]` : "";
-  const merchant = truncate(cleanMerchant(t.merchant || t.narration || "Unknown"));
+  const tagsStr = tags.length > 0 ? ` | tags: [${tags.join(", ")}]` : "";
+  const merchantRaw = t.merchant || t.narration || "Unknown";
+  const merchant = truncate(cleanMerchant(merchantRaw));
+  const category = categorize(t.category, merchantRaw);
   const sign = t.type === "INCOMING" ? "+" : "-";
   const modeStr = t.mode ? ` | ${t.mode}` : "";
-  return `${(t.timestamp as string).slice(0, 10)} | ${sign}${fmtAmount(t.amount)} | ${merchant}${modeStr}${tagsStr} [ID: ${t.uuid}]`;
+  const accountStr = t.account ? ` | ${truncate(t.account, 15)}` : "";
+  return `${(t.timestamp as string).slice(0, 10)} | ${sign}${fmtAmount(t.amount)} | ${merchant}${accountStr}${modeStr} | ${category}${tagsStr} [ID: ${t.uuid}]`;
 }
 
 /** Run a single unfold_patched sync for [from, to] with a per-batch timeout */
@@ -287,7 +290,77 @@ function runCommand(cmd: string, cwd: string, timeoutMs = 15_000): Promise<strin
 }
 
 // ─── Merchant categorisation ──────────────────────────────────────────────────
-const CATEGORY_MAP: { category: string; keywords: string[] }[] = [
+const CATEGORY_ID_MAP: Record<string, string> = {
+  "07ef4989-6002-4fe2-98d8-c2a6429904e8": "Health & Fitness",
+  "08d63a76-6e11-4467-854e-5a081fd51097": "Groceries",
+  "0b55293c-5b8d-48e4-91be-4312b87dd714": "Food & Drinks",
+  "247e3e5d-59bf-4bf8-82ff-c152569893ea": "Self Transfer",
+  "255b80bb-96c7-4254-be68-8b80dd1fc473": "Refunds",
+  "2ca04e4b-45e8-4e06-8029-9b1eeb35fc44": "Medical",
+  "2f20c891-b2d4-4a1b-b3aa-d02c0deffb02": "Loans / EMIs",
+  "3cf94230-f5bf-4aa7-a3f0-bb0c4453413f": "Transfer / People",
+  "3d3a06cc-92cb-4d88-b9c9-4ce53de25c17": "Transfer / People",
+  "46a9a71e-388e-418e-a13b-cc7d140f29b8": "Investments",
+  "46ab2657-0e00-40cf-af5d-5d65e4e58152": "Transfer / People",
+  "478baaf7-fe5d-4f96-ba96-f5e570782886": "Donations",
+  "54b06ae4-b19e-402e-9940-af8b2fec6a3d": "Investments",
+  "6176feae-21c5-4874-9d9a-908a257e0ede": "Transfer / People",
+  "6c41313d-82ed-4333-9329-ac75551e79c5": "Shopping",
+  "6e7a92ec-2798-408e-b164-6283d63a1ca9": "Entertainment",
+  "7505b993-d7fc-4461-9dc9-85c027a367ae": "Transfer / People",
+  "80b59092-aa0b-4b55-b136-4e7c8c68a31f": "Credit Card Bill",
+  "8281a1f2-df95-4299-97cc-c93b1e0a65ee": "Transfer / People",
+  "a1ff63ba-1712-4753-a558-2a051c94e709": "Subscriptions",
+  "a4303fd3-a231-44fe-aae3-47561855689e": "Shopping",
+  "a4ec128f-b01f-4a86-98f2-156c8b2b6071": "Investments",
+  "a9c18a13-2b0a-4006-847a-83e16045870c": "Self Transfer",
+  "b3f7d021-7853-4ebd-836c-769f3f5539f0": "Transfer / People",
+  "cbfad38c-afc8-49d3-b689-7171767df0d6": "Salary",
+  "e5f0f35e-716e-4557-a10f-fc6c18c253c4": "Bills & Utilities",
+  "e893b723-228f-4732-8c54-929f967e9364": "Interest / Returns",
+  "ea8d1a84-e017-4d28-8f98-9e2b0f752936": "Transport & Services",
+  "eeec0a99-9940-4361-92f6-12852fc8a051": "Bank Charges",
+  "f181114a-e486-4860-acc5-d95822a9d73f": "Transport & Fuel",
+  "f22d1ec8-5cc7-4b4e-b0d3-4193e757f52d": "Cashback / Rewards",
+  "f26aa519-14ba-47dc-a07e-7a6ff7a8dc1f": "Entertainment",
+  "f2d5dcf1-0c54-4f8d-957a-ae9b63e458f1": "Transfer / People",
+  "f48dec4d-6f58-44ae-b6df-c34dfc1d6c83": "Transfer / People"
+};
+
+const SMART_OVERRIDES: Record<string, string> = {
+  "swiggy": "Food Delivery",
+  "zomato": "Food Delivery",
+  "blinkit": "Groceries",
+  "zepto": "Groceries",
+  "bigbasket": "Groceries",
+  "blinkit commerce private limited": "Groceries",
+  "freshco": "Groceries",
+  "meat mart": "Groceries",
+  "bmtc bus": "Public Transport",
+  "rapido": "Cabs & Autos",
+  "uber": "Cabs & Autos",
+  "autorickshaw": "Cabs & Autos",
+  "ksrtc ban": "Travel",
+  "amazon": "Online Shopping",
+  "flipkart": "Online Shopping",
+  "ikea": "Furniture & Home",
+  "decathlon": "Sports & Fitness",
+  "bookmyshow": "Entertainment",
+  "youtube": "Subscriptions",
+  "apple": "Subscriptions",
+  "apple services": "Subscriptions",
+  "rentomojo": "Rent",
+  "reliance jio": "Telecom",
+  "airtel payments bank": "Telecom",
+  "lazypay": "Credit Card Bill",
+  "gokiwi tech private": "Credit Card Bill",
+  "groww": "Investments",
+  "indian clearing corporation limited": "Investments",
+  "canara bank": "Self Transfer",
+  "hdfc bank": "Self Transfer",
+};
+
+const CATEGORY_KEYWORDS_FALLBACK: { category: string; keywords: string[] }[] = [
   { category: "Food Delivery",    keywords: ["swiggy", "zomato"] },
   { category: "Quick Commerce",   keywords: ["blinkit", "zepto", "dunzo", "instamart", "bigbasket", "grofers"] },
   { category: "Transport",        keywords: ["uber", "ola", "rapido", "metro"] },
@@ -302,10 +375,29 @@ const CATEGORY_MAP: { category: string; keywords: string[] }[] = [
   { category: "Utilities",        keywords: ["electricity", "water bill", "bescom", "tata power", "adani electricity", "mahanagar gas"] },
 ];
 
-function categorize(merchant: string): string {
-  const lower = merchant.toLowerCase();
-  for (const { category, keywords } of CATEGORY_MAP) {
-    if (keywords.some((k) => lower.includes(k))) return category;
+function categorize(categoryId: string | null | undefined, merchant: string): string {
+  const clean = cleanMerchant(merchant).toLowerCase();
+  
+  // 1. Smart Overrides (Exact match first)
+  if (SMART_OVERRIDES[clean]) {
+    return SMART_OVERRIDES[clean];
+  }
+
+  // 2. Smart Overrides (Partial match)
+  for (const [key, value] of Object.entries(SMART_OVERRIDES)) {
+    if (clean.includes(key)) {
+       return value;
+    }
+  }
+
+  // 3. Fold UUID Native Category
+  if (categoryId && CATEGORY_ID_MAP[categoryId]) {
+    return CATEGORY_ID_MAP[categoryId];
+  }
+  
+  // 4. Legacy Keyword Fallback
+  for (const { category, keywords } of CATEGORY_KEYWORDS_FALLBACK) {
+    if (keywords.some((k) => clean.includes(k))) return category;
   }
   return "Other";
 }
@@ -647,7 +739,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (request.params.name === "get_recent_transactions") {
       const limit = Math.min(Number(request.params.arguments?.limit ?? 20), 500);
       const rows = await runQuery(
-        `SELECT uuid, amount, timestamp, type, merchant, narration, mode, tags
+        `SELECT uuid, amount, timestamp, type, merchant, narration, mode, tags, category, account
          FROM transactions ORDER BY timestamp DESC LIMIT ?`,
         [limit]
       );
@@ -696,7 +788,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       params.push(limit);
 
       const rows = await runQuery(
-        `SELECT uuid, amount, timestamp, type, merchant, narration, mode, tags
+        `SELECT uuid, amount, timestamp, type, merchant, narration, mode, tags, category, account
          FROM transactions ${where} ORDER BY timestamp DESC LIMIT ?`,
         params
       );
@@ -1247,11 +1339,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const endDate   = (request.params.arguments?.endDate   as string) || today;
 
       const rows = await runQuery<any>(
-        `SELECT merchant, SUM(amount) as total, COUNT(*) as cnt
+        `SELECT merchant, category, SUM(amount) as total, COUNT(*) as cnt
          FROM transactions
          WHERE type = 'OUTGOING' AND merchant IS NOT NULL AND merchant != ''
            AND date(timestamp) >= ? AND date(timestamp) <= ?
-         GROUP BY merchant`,
+         GROUP BY merchant, category`,
         [startDate, endDate]
       );
 
@@ -1260,7 +1352,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       let grandTotal = 0;
 
       for (const r of rows) {
-        const cat = categorize(r.merchant as string);
+        const cat = categorize(r.category, r.merchant as string);
         if (!cats.has(cat)) cats.set(cat, { total: 0, count: 0, merchantAmounts: new Map() });
         const d = cats.get(cat)!;
         d.total += r.total;
@@ -1664,7 +1756,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const dateWhere = dateConditions.length ? ` AND ${dateConditions.join(" AND ")}` : "";
 
       const rows = await runQuery<any>(
-        `SELECT uuid, amount, timestamp, type, merchant, narration, mode, tags
+        `SELECT uuid, amount, timestamp, type, merchant, narration, mode, tags, category, account
          FROM transactions
          WHERE uuid IN (${placeholders})${dateWhere}`,
         [...uuids, ...dateParams]
@@ -1718,7 +1810,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
       const rows = await runQuery<any>(
         `SELECT date(timestamp) as date, merchant, narration, amount, type, mode,
-                COALESCE(account_id, '') as account_id
+                COALESCE(account_id, '') as account_id, tags, category
          FROM transactions ${where} ORDER BY timestamp DESC`,
         params
       );
@@ -1730,17 +1822,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           : s;
       };
 
-      const header = "date,merchant,narration,amount,type,mode,account_id";
+      const header = "date,merchant,narration,amount,type,mode,account_id,category,tags";
       const csvLines = [header];
       for (const r of rows) {
+        const merchantRaw = r.merchant || "";
+        const tags = parseTags(r.tags).join(";");
         csvLines.push([
           escape(r.date),
-          escape(cleanMerchant(r.merchant || "")),
+          escape(cleanMerchant(merchantRaw)),
           escape(r.narration || ""),
           escape(r.amount),
           escape(r.type),
           escape(r.mode || ""),
           escape(r.account_id),
+          escape(categorize(r.category, merchantRaw)),
+          escape(tags),
         ].join(","));
       }
 
@@ -1759,7 +1855,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return {
         content: [{
           type: "text",
-          text: `✅ Exported ${rows.length.toLocaleString()} transactions to:\n${outputPath}${filterNote}\n\nColumns: date, merchant, narration, amount, type, mode, account_id`,
+          text: `✅ Exported ${rows.length.toLocaleString()} transactions to:\n${outputPath}${filterNote}\n\nColumns: date, merchant, narration, amount, type, mode, account_id, category, tags`,
         }]
       };
     }
