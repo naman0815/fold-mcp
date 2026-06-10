@@ -198,11 +198,14 @@ function parseTags(raw: string | null): string[] {
 
 function formatTransaction(t: any): string {
   const tags = parseTags(t.tags);
-  const tagsStr = tags.length > 0 ? ` [Tags: ${tags.join(", ")}]` : "";
-  const merchant = truncate(cleanMerchant(t.merchant || t.narration || "Unknown"));
+  const tagsStr = tags.length > 0 ? ` | tags: [${tags.join(", ")}]` : "";
+  const merchantRaw = t.merchant || t.narration || "Unknown";
+  const merchant = truncate(cleanMerchant(merchantRaw));
+  const category = categorize(t.category, merchantRaw);
   const sign = t.type === "INCOMING" ? "+" : "-";
   const modeStr = t.mode ? ` | ${t.mode}` : "";
-  return `${(t.timestamp as string).slice(0, 10)} | ${sign}${fmtAmount(t.amount)} | ${merchant}${modeStr}${tagsStr} [ID: ${t.uuid}]`;
+  const accountStr = t.account ? ` | ${truncate(t.account, 15)}` : "";
+  return `${(t.timestamp as string).slice(0, 10)} | ${sign}${fmtAmount(t.amount)} | ${merchant}${accountStr}${modeStr} | ${category}${tagsStr} [ID: ${t.uuid}]`;
 }
 
 /** Run a single unfold_patched sync for [from, to] with a per-batch timeout */
@@ -287,7 +290,17 @@ function runCommand(cmd: string, cwd: string, timeoutMs = 15_000): Promise<strin
 }
 
 // ─── Merchant categorisation ──────────────────────────────────────────────────
-const CATEGORY_MAP: { category: string; keywords: string[] }[] = [
+// Populate this with your own category UUID → name mappings from the Fold app.
+// Category UUIDs are stored in the `category` column of the transactions table.
+// Example: "08d63a76-6e11-4467-854e-5a081fd51097": "Groceries"
+const CATEGORY_ID_MAP: Record<string, string> = {};
+
+// Optional merchant-level overrides — takes priority over CATEGORY_ID_MAP.
+// Key: lowercase merchant name (or substring), value: category label.
+// Example: "swiggy": "Food Delivery"
+const SMART_OVERRIDES: Record<string, string> = {};
+
+const CATEGORY_KEYWORDS_FALLBACK: { category: string; keywords: string[] }[] = [
   { category: "Food Delivery",    keywords: ["swiggy", "zomato"] },
   { category: "Quick Commerce",   keywords: ["blinkit", "zepto", "dunzo", "instamart", "bigbasket", "grofers"] },
   { category: "Transport",        keywords: ["uber", "ola", "rapido", "metro"] },
@@ -302,10 +315,29 @@ const CATEGORY_MAP: { category: string; keywords: string[] }[] = [
   { category: "Utilities",        keywords: ["electricity", "water bill", "bescom", "tata power", "adani electricity", "mahanagar gas"] },
 ];
 
-function categorize(merchant: string): string {
-  const lower = merchant.toLowerCase();
-  for (const { category, keywords } of CATEGORY_MAP) {
-    if (keywords.some((k) => lower.includes(k))) return category;
+function categorize(categoryId: string | null | undefined, merchant: string): string {
+  const clean = cleanMerchant(merchant).toLowerCase();
+  
+  // 1. Smart Overrides (Exact match first)
+  if (SMART_OVERRIDES[clean]) {
+    return SMART_OVERRIDES[clean];
+  }
+
+  // 2. Smart Overrides (Partial match)
+  for (const [key, value] of Object.entries(SMART_OVERRIDES)) {
+    if (clean.includes(key)) {
+       return value;
+    }
+  }
+
+  // 3. Fold UUID Native Category
+  if (categoryId && CATEGORY_ID_MAP[categoryId]) {
+    return CATEGORY_ID_MAP[categoryId];
+  }
+  
+  // 4. Legacy Keyword Fallback
+  for (const { category, keywords } of CATEGORY_KEYWORDS_FALLBACK) {
+    if (keywords.some((k) => clean.includes(k))) return category;
   }
   return "Other";
 }
@@ -647,7 +679,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (request.params.name === "get_recent_transactions") {
       const limit = Math.min(Number(request.params.arguments?.limit ?? 20), 500);
       const rows = await runQuery(
-        `SELECT uuid, amount, timestamp, type, merchant, narration, mode, tags
+        `SELECT uuid, amount, timestamp, type, merchant, narration, mode, tags, category, account
          FROM transactions ORDER BY timestamp DESC LIMIT ?`,
         [limit]
       );
@@ -696,7 +728,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       params.push(limit);
 
       const rows = await runQuery(
-        `SELECT uuid, amount, timestamp, type, merchant, narration, mode, tags
+        `SELECT uuid, amount, timestamp, type, merchant, narration, mode, tags, category, account
          FROM transactions ${where} ORDER BY timestamp DESC LIMIT ?`,
         params
       );
@@ -1247,11 +1279,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const endDate   = (request.params.arguments?.endDate   as string) || today;
 
       const rows = await runQuery<any>(
-        `SELECT merchant, SUM(amount) as total, COUNT(*) as cnt
+        `SELECT merchant, category, SUM(amount) as total, COUNT(*) as cnt
          FROM transactions
          WHERE type = 'OUTGOING' AND merchant IS NOT NULL AND merchant != ''
            AND date(timestamp) >= ? AND date(timestamp) <= ?
-         GROUP BY merchant`,
+         GROUP BY merchant, category`,
         [startDate, endDate]
       );
 
@@ -1260,7 +1292,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       let grandTotal = 0;
 
       for (const r of rows) {
-        const cat = categorize(r.merchant as string);
+        const cat = categorize(r.category, r.merchant as string);
         if (!cats.has(cat)) cats.set(cat, { total: 0, count: 0, merchantAmounts: new Map() });
         const d = cats.get(cat)!;
         d.total += r.total;
@@ -1664,7 +1696,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const dateWhere = dateConditions.length ? ` AND ${dateConditions.join(" AND ")}` : "";
 
       const rows = await runQuery<any>(
-        `SELECT uuid, amount, timestamp, type, merchant, narration, mode, tags
+        `SELECT uuid, amount, timestamp, type, merchant, narration, mode, tags, category, account
          FROM transactions
          WHERE uuid IN (${placeholders})${dateWhere}`,
         [...uuids, ...dateParams]
@@ -1718,7 +1750,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
       const rows = await runQuery<any>(
         `SELECT date(timestamp) as date, merchant, narration, amount, type, mode,
-                COALESCE(account_id, '') as account_id
+                COALESCE(account_id, '') as account_id, tags, category
          FROM transactions ${where} ORDER BY timestamp DESC`,
         params
       );
@@ -1730,17 +1762,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           : s;
       };
 
-      const header = "date,merchant,narration,amount,type,mode,account_id";
+      const header = "date,merchant,narration,amount,type,mode,account_id,category,tags";
       const csvLines = [header];
       for (const r of rows) {
+        const merchantRaw = r.merchant || "";
+        const tags = parseTags(r.tags).join(";");
         csvLines.push([
           escape(r.date),
-          escape(cleanMerchant(r.merchant || "")),
+          escape(cleanMerchant(merchantRaw)),
           escape(r.narration || ""),
           escape(r.amount),
           escape(r.type),
           escape(r.mode || ""),
           escape(r.account_id),
+          escape(categorize(r.category, merchantRaw)),
+          escape(tags),
         ].join(","));
       }
 
@@ -1759,7 +1795,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return {
         content: [{
           type: "text",
-          text: `✅ Exported ${rows.length.toLocaleString()} transactions to:\n${outputPath}${filterNote}\n\nColumns: date, merchant, narration, amount, type, mode, account_id`,
+          text: `✅ Exported ${rows.length.toLocaleString()} transactions to:\n${outputPath}${filterNote}\n\nColumns: date, merchant, narration, amount, type, mode, account_id, category, tags`,
         }]
       };
     }
