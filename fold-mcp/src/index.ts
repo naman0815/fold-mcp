@@ -5,121 +5,19 @@ import {
   ListToolsRequestSchema,
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
-import initSqlJs from "sql.js";
-import type { Database, SqlJsStatic } from "sql.js";
-import { exec, spawn } from "child_process";
+import { exec } from "child_process";
 import path from "path";
 import fs from "fs";
 import os from "os";
 
 import { fileURLToPath } from "url";
+import { runQuery, runQueryManual, runFtsQuery, rebuildFtsIfStale, withAccount } from "./db.js";
+import * as accounts from "./accounts.js";
 
 // ─── Paths ───────────────────────────────────────────────────────────────────
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const dbPath = path.resolve(__dirname, "..", "..", "db.sqlite");
-const cliPath = path.resolve(__dirname, "..", "..",
-  process.platform === "win32" ? "unfold_patched.exe" : "unfold_patched"
-);
 const cliDir  = path.resolve(__dirname, "..", "..");
-
-// ─── SQLite (sql.js — pure WASM, no native compilation) ──────────────────────
-// eslint-disable-next-line prefer-const
-let SQL: SqlJsStatic;
-let db: Database;    // main DB loaded from db.sqlite (reloaded after sync)
-let ftsDb: Database; // in-memory FTS index (rebuilt at startup and after sync)
-let dbLoadedAt = 0;  // mtime of db.sqlite when last loaded into memory
-
-function reloadDbFromDisk(): void {
-  const buf = fs.readFileSync(dbPath);
-  if (db) db.close();
-  db = new SQL.Database(buf);
-  dbLoadedAt = fs.statSync(dbPath).mtimeMs;
-  rebuildFtsIfStale().catch(() => {});
-}
-
-function reloadDbIfStale(): void {
-  try {
-    const mtime = fs.statSync(dbPath).mtimeMs;
-    if (mtime > dbLoadedAt) reloadDbFromDisk();
-  } catch { /* db doesn't exist yet — ignore */ }
-}
-
-function runQuery<T>(query: string, params: any[] = []): Promise<T[]> {
-  try {
-    const stmt = db.prepare(query);
-    stmt.bind(params);
-    const rows: T[] = [];
-    while (stmt.step()) rows.push(stmt.getAsObject() as T);
-    stmt.free();
-    return Promise.resolve(rows);
-  } catch (err) {
-    return Promise.reject(err);
-  }
-}
-
-function runFtsQuery<T>(query: string, params: any[] = []): Promise<T[]> {
-  try {
-    const stmt = ftsDb.prepare(query);
-    stmt.bind(params);
-    const rows: T[] = [];
-    while (stmt.step()) rows.push(stmt.getAsObject() as T);
-    stmt.free();
-    return Promise.resolve(rows);
-  } catch (err) {
-    return Promise.reject(err);
-  }
-}
-
-function runFtsExec(query: string): Promise<void> {
-  try {
-    ftsDb.exec(query);
-    return Promise.resolve();
-  } catch (err) {
-    return Promise.reject(err);
-  }
-}
-
-// ─── FTS index setup ─────────────────────────────────────────────────────────
-async function initFts(): Promise<void> {
-  await runFtsExec(`
-    CREATE VIRTUAL TABLE IF NOT EXISTS tx_fts USING fts4(
-      uuid, merchant, narration, summary,
-      notindexed=uuid,
-      tokenize=porter
-    )
-  `);
-  await rebuildFtsIfStale();
-}
-
-async function rebuildFtsIfStale(): Promise<void> {
-  // Skip gracefully if transactions table doesn't exist yet (pre-first-sync)
-  const [tableCheck] = await runQuery<any>(
-    `SELECT name FROM sqlite_master WHERE type='table' AND name='transactions'`
-  );
-  if (!tableCheck) return;
-
-  const [ftsRow]  = await runFtsQuery<any>(`SELECT COUNT(*) as cnt FROM tx_fts`);
-  const [mainRow] = await runQuery<any>(`SELECT COUNT(*) as cnt FROM transactions`);
-  if ((ftsRow?.cnt ?? 0) >= (mainRow?.cnt ?? 0)) return;
-
-  const rows = await runQuery<any>(
-    `SELECT uuid, COALESCE(merchant,'') as merchant,
-            COALESCE(narration,'') as narration,
-            COALESCE(summary,'') as summary
-     FROM transactions`
-  );
-
-  ftsDb.exec("DELETE FROM tx_fts");
-  ftsDb.exec("BEGIN");
-  const stmt = ftsDb.prepare(
-    `INSERT INTO tx_fts(uuid, merchant, narration, summary) VALUES (?,?,?,?)`
-  );
-  for (const r of rows) stmt.run([r.uuid, r.merchant, r.narration, r.summary]);
-  stmt.free();
-  ftsDb.exec("COMMIT");
-  console.error(`FTS index built: ${rows.length} rows`);
-}
 
 function toFtsQuery(q: string): string {
   if (/["*]|\b(?:AND|OR|NOT)\b/.test(q)) return q;
@@ -208,28 +106,10 @@ function formatTransaction(t: any): string {
   return `${(t.timestamp as string).slice(0, 10)} | ${sign}${fmtAmount(t.amount)} | ${merchant}${accountStr}${modeStr} | ${category}${tagsStr} [ID: ${t.uuid}]`;
 }
 
-/** Run a single unfold_patched sync for [from, to] with a per-batch timeout */
-function runBatch(from: string, to: string, timeoutMs = 60_000): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const cmd = `"${cliPath}" transactions -d --since "${from}" --till "${to}"`;
-    const child = exec(cmd, { cwd: cliDir });
-
-    let stdout = "";
-    let stderr = "";
-    child.stdout?.on("data", (d) => (stdout += d));
-    child.stderr?.on("data", (d) => (stderr += d));
-
-    const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error(`Batch ${from} → ${to} timed out after ${timeoutMs / 1000}s`));
-    }, timeoutMs);
-
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      if (code === 0 || stderr) resolve(stderr.trim() || stdout.trim() || "ok");
-      else reject(new Error(`Batch ${from} → ${to} exited with code ${code}: ${stderr}`));
-    });
-  });
+/** Run a single unfold_patched sync for [from, to] against one Fold account, then upsert into Turso. */
+async function runBatch(accountId: string, from: string, to: string): Promise<string> {
+  const { synced } = await accounts.runSync(accountId, from, to);
+  return `synced ${synced} row${synced === 1 ? "" : "s"}`;
 }
 
 /**
@@ -248,11 +128,12 @@ function yearlyBatches(startDate: string, endDate: string): { from: string; to: 
 }
 
 /**
- * Run batches concurrently with a max concurrency limit.
+ * Run batches concurrently (against one Fold account) with a max concurrency limit.
  * Results are passed to onResult with their original index so callers
  * can reconstruct chronological order regardless of completion order.
  */
 async function runBatchesConcurrent(
+  accountId: string,
   batches: { from: string; to: string }[],
   concurrency: number,
   onResult: (index: number, from: string, to: string, result: string | Error) => void
@@ -263,7 +144,7 @@ async function runBatchesConcurrent(
       const idx = nextIdx++;
       const { from, to } = batches[idx];
       try {
-        const result = await runBatch(from, to);
+        const result = await runBatch(accountId, from, to);
         onResult(idx, from, to, result);
       } catch (err: any) {
         onResult(idx, from, to, err instanceof Error ? err : new Error(String(err)));
@@ -699,6 +580,71 @@ const GET_SAVINGS_RATE_TOOL: Tool = {
   }
 };
 
+// ─── Multi-account tools ──────────────────────────────────────────────────────
+const LIST_FOLD_ACCOUNTS_TOOL: Tool = {
+  name: "list_fold_accounts",
+  description: "List every Fold account linked to this server, showing which one is active and when each last synced.",
+  inputSchema: { type: "object", properties: {} }
+};
+
+const ADD_FOLD_ACCOUNT_TOOL: Tool = {
+  name: "add_fold_account",
+  description: "Link a new Fold account: creates the account record and sends an OTP to the given phone number. Follow up with verify_fold_account_otp once you have the code.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      label: { type: "string", description: "A short name for this account, e.g. 'Dad' or 'Personal'." },
+      phone: { type: "string", description: "The phone number associated with the Fold account (without +91 prefix)." }
+    },
+    required: ["label", "phone"]
+  }
+};
+
+const VERIFY_FOLD_ACCOUNT_OTP_TOOL: Tool = {
+  name: "verify_fold_account_otp",
+  description: "Complete linking a Fold account by submitting the OTP received via SMS after calling add_fold_account.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      accountId: { type: "string", description: "The account id returned by add_fold_account." },
+      otp:       { type: "string", description: "The OTP code received via SMS." }
+    },
+    required: ["accountId", "otp"]
+  }
+};
+
+const SET_ACTIVE_FOLD_ACCOUNT_TOOL: Tool = {
+  name: "set_active_fold_account",
+  description: "Set which linked Fold account is used by default when a tool call doesn't specify one explicitly.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      accountId: { type: "string", description: "The account id to make active (see list_fold_accounts)." }
+    },
+    required: ["accountId"]
+  }
+};
+
+// Every data-query tool above (all except check_for_updates and the account-management
+// tools themselves) gets an optional `account` argument added here in one place, rather
+// than by hand-editing 21 near-identical inputSchema objects.
+const ACCOUNT_PARAM_DESCRIPTION =
+  "Which linked Fold account to use — its id or label (e.g. 'Dad'). Defaults to the active account. Use list_fold_accounts to see what's linked.";
+for (const tool of [
+  GET_RECENT_TRANSACTIONS_TOOL, SEARCH_TRANSACTIONS_TOOL, GET_SPENDING_SUMMARY_TOOL,
+  SYNC_FOLD_DATA_TOOL, GET_SYNC_STATUS_TOOL, GET_MERCHANT_SUMMARY_TOOL, GET_MONTHLY_TREND_TOOL,
+  GET_BALANCE_HISTORY_TOOL, GET_SPENDING_BY_MODE_TOOL, GET_WEEKLY_DIGEST_TOOL, GET_TAX_YEAR_REPORT_TOOL,
+  GET_UNUSUAL_TRANSACTIONS_TOOL, GET_CATEGORY_BREAKDOWN_TOOL, GET_SPENDING_STREAK_TOOL,
+  GET_RECURRING_MERCHANTS_TOOL, COMPARE_PERIODS_TOOL, GET_SPENDING_FORECAST_TOOL,
+  GET_ACCOUNT_BREAKDOWN_TOOL, GET_DAY_OF_WEEK_PATTERNS_TOOL, FULL_TEXT_SEARCH_TOOL,
+  EXPORT_TRANSACTIONS_CSV_TOOL, GET_SAVINGS_RATE_TOOL,
+]) {
+  (tool.inputSchema.properties as Record<string, unknown>).account = {
+    type: "string",
+    description: ACCOUNT_PARAM_DESCRIPTION,
+  };
+}
+
 // ─── Server ───────────────────────────────────────────────────────────────────
 const server = new Server(
   { name: "fold-mcp", version: "6.0.0" },
@@ -730,11 +676,67 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     FULL_TEXT_SEARCH_TOOL,
     EXPORT_TRANSACTIONS_CSV_TOOL,
     GET_SAVINGS_RATE_TOOL,
+    LIST_FOLD_ACCOUNTS_TOOL,
+    ADD_FOLD_ACCOUNT_TOOL,
+    VERIFY_FOLD_ACCOUNT_OTP_TOOL,
+    SET_ACTIVE_FOLD_ACCOUNT_TOOL,
   ],
 }));
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
+    // ── list_fold_accounts ───────────────────────────────────────────────────
+    // Account-management tools run before account resolution — they're how you
+    // create the first linked account, so they can't require one to already exist.
+    if (request.params.name === "list_fold_accounts") {
+      const all = await accounts.listAccounts();
+      if (!all.length) {
+        return { content: [{ type: "text", text: "No Fold accounts linked yet. Use add_fold_account to link one." }] };
+      }
+      const text = all.map((a) => {
+        const flags = [a.isActive ? "active" : null, a.status !== "active" ? a.status : null].filter(Boolean).join(", ");
+        return `${a.label} (id: ${a.id})${flags ? ` [${flags}]` : ""} — last synced: ${a.lastSyncedAt ?? "never"}`;
+      }).join("\n");
+      return { content: [{ type: "text", text }] };
+    }
+
+    // ── add_fold_account ─────────────────────────────────────────────────────
+    if (request.params.name === "add_fold_account") {
+      const label = request.params.arguments?.label as string | undefined;
+      const phone = request.params.arguments?.phone as string | undefined;
+      if (!label || !phone) throw new Error("Both label and phone are required.");
+      const account = await accounts.createAccount(label, phone);
+      await accounts.sendOtp(account.id);
+      return {
+        content: [{
+          type: "text",
+          text: `OTP sent to ${phone}. Call verify_fold_account_otp with accountId "${account.id}" and the code you received.`,
+        }],
+      };
+    }
+
+    // ── verify_fold_account_otp ──────────────────────────────────────────────
+    if (request.params.name === "verify_fold_account_otp") {
+      const accountId = request.params.arguments?.accountId as string | undefined;
+      const otp       = request.params.arguments?.otp       as string | undefined;
+      if (!accountId || !otp) throw new Error("Both accountId and otp are required.");
+      await accounts.verifyOtp(accountId, otp);
+      return { content: [{ type: "text", text: `Login successful — account "${accountId}" is now linked.` }] };
+    }
+
+    // ── set_active_fold_account ──────────────────────────────────────────────
+    if (request.params.name === "set_active_fold_account") {
+      const accountId = request.params.arguments?.accountId as string | undefined;
+      if (!accountId) throw new Error("accountId is required.");
+      await accounts.setActiveAccountId(accountId);
+      return { content: [{ type: "text", text: `Active account set to "${accountId}".` }] };
+    }
+
+    // Every remaining tool operates against one linked Fold account — resolve it
+    // once (defaulting to the active account) and make it available to every
+    // runQuery() call below via AsyncLocalStorage.
+    const foldAccountId = await accounts.resolveAccountId(request.params.arguments?.account as string | undefined);
+    return await withAccount(foldAccountId, async () => {
     // ── get_recent_transactions ─────────────────────────────────────────────
     if (request.params.name === "get_recent_transactions") {
       const limit = Math.min(Number(request.params.arguments?.limit ?? 20), 500);
@@ -859,16 +861,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const batches = yearlyBatches(startDate, endDate);
       const estimatedSecs = batches.length * 15;
 
-      // Spawn each batch as a detached background process so we return
-      // immediately and never hit the MCP client's request timeout.
-      for (const { from, to } of batches) {
-        const child = spawn(
-          cliPath,
-          ["transactions", "-d", "--since", from, "--till", to],
-          { cwd: cliDir, detached: true, stdio: "ignore" }
-        );
-        child.unref();
-      }
+      // Run batches (up to 3 concurrently) in the background so we return
+      // immediately and never hit the MCP client's request timeout. This is a
+      // plain async call, not awaited — accounts.runSync takes foldAccountId
+      // explicitly rather than reading it from context, so it keeps running
+      // correctly after this request handler returns.
+      runBatchesConcurrent(foldAccountId, batches, 3, (_idx, from, to, result) => {
+        if (result instanceof Error) {
+          console.error(`sync_fold_data: batch ${from} → ${to} failed: ${result.message}`);
+        } else {
+          console.error(`sync_fold_data: batch ${from} → ${to} — ${result}`);
+        }
+      }).catch((err) => console.error("sync_fold_data: background sync failed:", err));
 
       const mins = Math.ceil(estimatedSecs / 60);
       const lines = [
@@ -882,7 +886,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     // ── get_sync_status ─────────────────────────────────────────────────────
     if (request.params.name === "get_sync_status") {
-      reloadDbIfStale(); // pick up any batches that completed since last load
+      await rebuildFtsIfStale().catch(() => {}); // pick up rows from batches that completed since last check
       const [stats] = await runQuery<any>(
         `SELECT COUNT(*) as total,
                 MIN(date(timestamp)) as earliest,
@@ -1142,22 +1146,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       );
 
       const ninetyDaysAgo = new Date(today.getTime() - 90 * 864e5).toISOString().slice(0, 10);
-      const unusualRows = await runQuery<any>(
+      // Aliased FROM + JOIN subquery on transactions — auto-scoping can't handle this
+      // safely (see scopeSql in db.ts), so both occurrences are scoped explicitly here.
+      const unusualRows = await runQueryManual<any>(
         `SELECT t.timestamp, t.merchant, t.amount, stats.avg_amount,
                 ROUND(CAST(t.amount AS REAL) / stats.avg_amount, 1) as multiplier
          FROM transactions t
          JOIN (
            SELECT merchant, AVG(amount) as avg_amount, COUNT(*) as tx_count
            FROM transactions
-           WHERE type = 'OUTGOING' AND merchant IS NOT NULL AND merchant != ''
+           WHERE fold_account_id = ? AND type = 'OUTGOING' AND merchant IS NOT NULL AND merchant != ''
              AND date(timestamp) >= ?
            GROUP BY merchant HAVING COUNT(*) >= 3
          ) stats ON t.merchant = stats.merchant
-         WHERE t.type = 'OUTGOING'
+         WHERE t.fold_account_id = ? AND t.type = 'OUTGOING'
            AND date(t.timestamp) >= ? AND date(t.timestamp) <= ?
            AND t.amount >= stats.avg_amount * 2.5
          ORDER BY multiplier DESC LIMIT 5`,
-        [ninetyDaysAgo, weekStartStr, weekEndStr]
+        (foldAccountId) => [foldAccountId, ninetyDaysAgo, foldAccountId, weekStartStr, weekEndStr]
       );
 
       const weekDayMap = new Map<string, { outgoing: number; incoming: number }>();
@@ -1298,7 +1304,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const minHistory = Number(request.params.arguments?.minHistory ?? 3);
       const limit      = Math.min(Number(request.params.arguments?.limit ?? 20), 100);
 
-      const rows = await runQuery<any>(
+      // Aliased FROM + JOIN subquery on transactions — see the identical note in
+      // get_weekly_digest above. Both occurrences are scoped explicitly here.
+      const rows = await runQueryManual<any>(
         `SELECT t.uuid, t.timestamp, t.merchant, t.amount,
                 stats.avg_amount, stats.tx_count,
                 ROUND(CAST(t.amount AS REAL) / stats.avg_amount, 1) as multiplier
@@ -1306,16 +1314,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
          JOIN (
            SELECT merchant, AVG(amount) as avg_amount, COUNT(*) as tx_count
            FROM transactions
-           WHERE type = 'OUTGOING' AND merchant IS NOT NULL AND merchant != ''
+           WHERE fold_account_id = ? AND type = 'OUTGOING' AND merchant IS NOT NULL AND merchant != ''
              AND date(timestamp) >= ? AND date(timestamp) <= ?
            GROUP BY merchant HAVING COUNT(*) >= ?
          ) stats ON t.merchant = stats.merchant
-         WHERE t.type = 'OUTGOING'
+         WHERE t.fold_account_id = ? AND t.type = 'OUTGOING'
            AND date(t.timestamp) >= ? AND date(t.timestamp) <= ?
            AND t.amount >= stats.avg_amount * ?
          ORDER BY multiplier DESC
          LIMIT ?`,
-        [startDate, endDate, minHistory, startDate, endDate, multiplier, limit]
+        (foldAccountId) => [foldAccountId, startDate, endDate, minHistory, foldAccountId, startDate, endDate, multiplier, limit]
       );
 
       if (!rows.length) {
@@ -1938,7 +1946,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: "text", text }] };
     }
 
-    throw new Error(`Unknown tool: ${request.params.name}`);
+      throw new Error(`Unknown tool: ${request.params.name}`);
+    });
   } catch (error: any) {
     return {
       content: [{ type: "text", text: `Error: ${error.message}` }],
@@ -1948,21 +1957,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 async function main() {
-  // @ts-ignore — sql.js types don't expose the module-level assignment correctly
-  SQL = await initSqlJs();
-
-  try {
-    const buf = fs.readFileSync(dbPath);
-    db = new SQL.Database(buf);
-    dbLoadedAt = fs.statSync(dbPath).mtimeMs;
-  } catch {
-    // db.sqlite doesn't exist yet (first run before any sync)
-    db = new SQL.Database();
-  }
-
-  ftsDb = new SQL.Database();
-  await initFts();
-
+  // Data now lives in Turso (see db.ts) instead of a local db.sqlite file — there's
+  // no local database to load at startup. The per-account FTS cache (also in db.ts)
+  // is built lazily on first use rather than eagerly here.
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("Fold MCP Server v6.0.0 running on stdio");
