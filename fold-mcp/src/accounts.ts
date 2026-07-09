@@ -114,13 +114,19 @@ export async function resolveAccountId(explicit?: string): Promise<string> {
 // ─── Bridging to unfold_patched (Go CLI) ─────────────────────────────────────
 function runCli(args: string[], timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(cliPath, args, { cwd: cliDir });
+    // -v enables the CLI's debug logging (zerolog to stderr) so a timeout still
+    // tells us how far the process got (e.g. "sent OTP request" vs hung before
+    // even making the HTTP call) instead of giving zero diagnostic signal.
+    const child = spawn(cliPath, [...args, "-v"], { cwd: cliDir });
     let stdout = "", stderr = "";
     child.stdout?.on("data", (d) => { stdout += d; });
     child.stderr?.on("data", (d) => { stderr += d; });
     const timer = setTimeout(() => {
       child.kill();
-      reject(new Error(`unfold_patched ${args.join(" ")} timed out after ${timeoutMs / 1000}s`));
+      reject(new Error(
+        `unfold_patched ${args.join(" ")} timed out after ${timeoutMs / 1000}s. ` +
+        `Partial stdout: ${stdout.trim() || "(none)"} | Partial stderr: ${stderr.trim() || "(none)"}`
+      ));
     }, timeoutMs);
     child.on("close", (code) => { clearTimeout(timer); resolve({ code: code ?? -1, stdout, stderr }); });
     child.on("error", (err) => { clearTimeout(timer); reject(err); });
@@ -198,7 +204,7 @@ export async function sendOtp(accountId: string): Promise<void> {
   await withTempConfig(accountId, async (tmpConfigPath) => {
     const { code, stderr } = await runCli(
       ["login", "--phone", account.phone, "--send-otp", "--config", tmpConfigPath],
-      30_000
+      75_000 // unfold_cli's own HTTP client times out at 60s — give it room to surface that error first
     );
     if (code !== 0) throw new Error(`Failed to send OTP to ${account.phone}: ${stderr.trim() || "unknown error"}`);
   });
@@ -210,7 +216,7 @@ export async function verifyOtp(accountId: string, otp: string): Promise<void> {
   await withTempConfig(accountId, async (tmpConfigPath) => {
     const { code, stderr } = await runCli(
       ["login", "--phone", account.phone, "--otp", otp, "--config", tmpConfigPath],
-      30_000
+      75_000 // unfold_cli's own HTTP client times out at 60s — give it room to surface that error first
     );
     if (code !== 0) throw new Error(`OTP verification failed: ${stderr.trim() || "unknown error"}`);
   });

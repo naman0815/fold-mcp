@@ -2017,11 +2017,15 @@ async function startHttpServer(): Promise<void> {
 
   app.post("/mcp", bearerAuth, async (req, res) => {
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
+    const method = (req.body as any)?.method;
     let transport: StreamableHTTPServerTransport;
 
     if (sessionId && transports[sessionId]) {
       transport = transports[sessionId];
-    } else if (!sessionId && isInitializeRequest(req.body)) {
+    } else if (isInitializeRequest(req.body)) {
+      // Treat any initialize request as fresh, even if the client attached a
+      // stale mcp-session-id (e.g. remembered from before this process
+      // restarted — in-memory sessions don't survive a Render restart/sleep).
       transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => crypto.randomUUID(),
         onsessioninitialized: (sid) => { transports[sid] = transport; },
@@ -2032,6 +2036,10 @@ async function startHttpServer(): Promise<void> {
       const server = createServer();
       await server.connect(transport);
     } else {
+      console.error(
+        `/mcp POST rejected: method=${method ?? "?"} sessionId=${sessionId ?? "(none)"} ` +
+        `knownSession=${sessionId ? Boolean(transports[sessionId]) : "n/a"} — client should re-initialize`
+      );
       res.status(400).json({
         jsonrpc: "2.0",
         error: { code: -32000, message: "Bad Request: No valid session ID provided" },
@@ -2046,6 +2054,7 @@ async function startHttpServer(): Promise<void> {
   const handleSessionRequest = async (req: express.Request, res: express.Response) => {
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
     if (!sessionId || !transports[sessionId]) {
+      console.error(`/mcp ${req.method} rejected: sessionId=${sessionId ?? "(none)"} not found in this process`);
       res.status(400).send("Invalid or missing session ID");
       return;
     }
