@@ -1,0 +1,12 @@
+.git
+.worktrees
+.superpowers
+node_modules
+fold-mcp/node_modules
+fold-mcp/build
+fold-mcp/.env
+.env
+db.sqlite
+tx.log
+unfold_patched
+*.DS_Store
