@@ -6,4 +6,7 @@ fold-mcp/build/
 fold-mcp/node_modules/
 unfold_patched
 .superpowers/
+.env
+fold-mcp/.env
+*.DS_Store
 
