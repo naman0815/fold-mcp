@@ -19,6 +19,11 @@ COPY fold-mcp/ ./
 RUN npm run build && npm prune --omit=dev
 
 FROM node:20-bookworm-slim
+# node:*-slim strips CA certificates, so the Go binary's HTTPS calls to
+# api.fold.money fail TLS verification ("x509: certificate signed by unknown
+# authority") without this — bit us in production, verified by the fix.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=go-builder /out/unfold_patched ./unfold_patched
 COPY --from=node-builder /src/fold-mcp/build ./fold-mcp/build

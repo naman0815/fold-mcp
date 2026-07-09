@@ -112,6 +112,14 @@ export async function resolveAccountId(explicit?: string): Promise<string> {
 }
 
 // ─── Bridging to unfold_patched (Go CLI) ─────────────────────────────────────
+// Known quirk (verified in production, not something we've touched): on any
+// error path, unfold_cli logs the error and calls runtime.Goexit() rather than
+// os.Exit(), so main.go's `defer viper.WriteConfig()` still runs — but main.go
+// also spawns a goroutine that blocks forever waiting for SIGINT, which keeps
+// the process alive indefinitely afterward. Success paths return normally and
+// exit promptly; only the error path hangs until we kill it at timeoutMs,
+// which is why an error surfaces slowly (via the timeout's partial stderr)
+// rather than immediately.
 function runCli(args: string[], timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     // -v enables the CLI's debug logging (zerolog to stderr) so a timeout still
