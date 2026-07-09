@@ -1,6 +1,8 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
+import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -18,6 +20,7 @@ import { fileURLToPath } from "url";
 import { runQuery, runQueryManual, runFtsQuery, rebuildFtsIfStale, withAccount } from "./db.js";
 import * as accounts from "./accounts.js";
 import { config } from "./config.js";
+import { TursoOAuthProvider } from "./oauth/store.js";
 
 // ─── Paths ───────────────────────────────────────────────────────────────────
 const __filename = fileURLToPath(import.meta.url);
@@ -1995,13 +1998,19 @@ async function startHttpServer(): Promise<void> {
   const app = express();
   app.use(express.json());
 
+  const issuerUrl = new URL(config.publicBaseUrl);
+  const oauthProvider = new TursoOAuthProvider();
+  app.use(mcpAuthRouter({ provider: oauthProvider, issuerUrl }));
+
+  const bearerAuth = requireBearerAuth({ verifier: oauthProvider });
+
   const transports: Record<string, StreamableHTTPServerTransport> = {};
 
   app.get("/healthz", (_req, res) => {
     res.status(200).json({ status: "ok" });
   });
 
-  app.post("/mcp", async (req, res) => {
+  app.post("/mcp", bearerAuth, async (req, res) => {
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
     let transport: StreamableHTTPServerTransport;
 
@@ -2038,8 +2047,8 @@ async function startHttpServer(): Promise<void> {
     await transports[sessionId].handleRequest(req, res);
   };
 
-  app.get("/mcp", handleSessionRequest);
-  app.delete("/mcp", handleSessionRequest);
+  app.get("/mcp", bearerAuth, handleSessionRequest);
+  app.delete("/mcp", bearerAuth, handleSessionRequest);
 
   app.listen(config.port, () => {
     console.error(`Fold MCP Server v6.0.0 listening on port ${config.port} (HTTP, /mcp)`);

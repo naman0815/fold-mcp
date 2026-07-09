@@ -137,7 +137,10 @@ async function materializeConfig(accountId: string): Promise<string> {
 
   const data: any = {};
   if (secretsResult.rows.length) {
-    const [accessToken, refreshToken, deviceHash] = secretsResult.rows[0] as any;
+    const row = secretsResult.rows[0] as any;
+    const accessToken = row.access_token;
+    const refreshToken = row.refresh_token;
+    const deviceHash = row.device_hash;
     data.device_hash = deviceHash;
     if (accessToken) data.token = { access: accessToken, refresh: refreshToken };
   }
