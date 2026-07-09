@@ -1996,6 +1996,11 @@ async function main() {
  */
 async function startHttpServer(): Promise<void> {
   const app = express();
+  // Render (like Heroku/most PaaS) sits behind a reverse proxy and sets
+  // X-Forwarded-For; without this, express-rate-limit (used internally by
+  // mcpAuthRouter's /authorize and /token endpoints) refuses to trust it and
+  // logs a validation error on every request to those routes.
+  app.set("trust proxy", 1);
   app.use(express.json());
 
   const issuerUrl = new URL(config.publicBaseUrl);
