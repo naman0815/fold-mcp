@@ -1,18 +1,23 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  isInitializeRequest,
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { exec } from "child_process";
 import path from "path";
 import fs from "fs";
 import os from "os";
+import crypto from "crypto";
+import express from "express";
 
 import { fileURLToPath } from "url";
 import { runQuery, runQueryManual, runFtsQuery, rebuildFtsIfStale, withAccount } from "./db.js";
 import * as accounts from "./accounts.js";
+import { config } from "./config.js";
 
 // ─── Paths ───────────────────────────────────────────────────────────────────
 const __filename = fileURLToPath(import.meta.url);
@@ -646,6 +651,11 @@ for (const tool of [
 }
 
 // ─── Server ───────────────────────────────────────────────────────────────────
+// A Server instance can only ever be connect()ed to one transport — fine for a
+// single stdio process, but the HTTP transport serves one session per request
+// and needs a fresh Server per session. createServer() builds one; main() below
+// picks stdio (one instance, connected once) or HTTP (one instance per session).
+function createServer(): Server {
 const server = new Server(
   { name: "fold-mcp", version: "6.0.0" },
   { capabilities: { tools: {} } }
@@ -1956,13 +1966,84 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
+  return server;
+}
+
+// ─── Transport: stdio (Claude Desktop) or HTTP (remote, Claude web/mobile) ──
+// Data lives in Turso (see db.ts) instead of a local db.sqlite file — there's no
+// local database to load at startup either way. The per-account FTS cache (also
+// in db.ts) is built lazily on first use.
 async function main() {
-  // Data now lives in Turso (see db.ts) instead of a local db.sqlite file — there's
-  // no local database to load at startup. The per-account FTS cache (also in db.ts)
-  // is built lazily on first use rather than eagerly here.
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("Fold MCP Server v6.0.0 running on stdio");
+  if (process.env.MCP_TRANSPORT === "http") {
+    await startHttpServer();
+  } else {
+    const server = createServer();
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+    console.error("Fold MCP Server v6.0.0 running on stdio");
+  }
+}
+
+/**
+ * One MCP session = one Server instance + one StreamableHTTPServerTransport,
+ * keyed by the mcp-session-id header the SDK issues on initialize. This is the
+ * SDK's documented stateful multi-session pattern — the Server class itself
+ * can only ever be connect()ed to a single transport, hence createServer()
+ * being called fresh per session below rather than reusing one global server.
+ */
+async function startHttpServer(): Promise<void> {
+  const app = express();
+  app.use(express.json());
+
+  const transports: Record<string, StreamableHTTPServerTransport> = {};
+
+  app.get("/healthz", (_req, res) => {
+    res.status(200).json({ status: "ok" });
+  });
+
+  app.post("/mcp", async (req, res) => {
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+    let transport: StreamableHTTPServerTransport;
+
+    if (sessionId && transports[sessionId]) {
+      transport = transports[sessionId];
+    } else if (!sessionId && isInitializeRequest(req.body)) {
+      transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => crypto.randomUUID(),
+        onsessioninitialized: (sid) => { transports[sid] = transport; },
+      });
+      transport.onclose = () => {
+        if (transport.sessionId) delete transports[transport.sessionId];
+      };
+      const server = createServer();
+      await server.connect(transport);
+    } else {
+      res.status(400).json({
+        jsonrpc: "2.0",
+        error: { code: -32000, message: "Bad Request: No valid session ID provided" },
+        id: null,
+      });
+      return;
+    }
+
+    await transport.handleRequest(req, res, req.body);
+  });
+
+  const handleSessionRequest = async (req: express.Request, res: express.Response) => {
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+    if (!sessionId || !transports[sessionId]) {
+      res.status(400).send("Invalid or missing session ID");
+      return;
+    }
+    await transports[sessionId].handleRequest(req, res);
+  };
+
+  app.get("/mcp", handleSessionRequest);
+  app.delete("/mcp", handleSessionRequest);
+
+  app.listen(config.port, () => {
+    console.error(`Fold MCP Server v6.0.0 listening on port ${config.port} (HTTP, /mcp)`);
+  });
 }
 
 main().catch((error) => {
