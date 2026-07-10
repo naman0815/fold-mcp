@@ -31,7 +31,7 @@ STEP 1 — Detect my operating system:
 ─────────────────────────────────────────
 
 STEP 2 — Clone the repository into the current directory:
-  Run: git clone --depth 1 https://github.com/naman0815/fold-mcp .
+  Run: git clone --depth 1 -b local-mcp https://github.com/naman0815/unfold-mcp.git .
   (git is pre-installed on modern macOS and Windows 10+. If it is missing, install it first:
     macOS: brew install git
     Windows: winget install --id Git.Git -e)
