@@ -22,7 +22,7 @@ The easiest way to get started: create an empty folder, open Claude Code inside 
 ### 1. Clone and build
 
 ```bash
-git clone https://github.com/naman0815/fold-mcp.git
+git clone -b local-mcp https://github.com/naman0815/unfold-mcp.git fold-mcp
 cd fold-mcp
 
 # Build the MCP server
