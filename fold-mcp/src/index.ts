@@ -718,7 +718,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const label = request.params.arguments?.label as string | undefined;
       const phone = request.params.arguments?.phone as string | undefined;
       if (!label || !phone) throw new Error("Both label and phone are required.");
-      const account = await accounts.createAccount(label, phone);
+      const existing = await accounts.getAccountByPhone(phone);
+      const account = existing ?? (await accounts.createAccount(label, phone));
       await accounts.sendOtp(account.id);
       return {
         content: [{

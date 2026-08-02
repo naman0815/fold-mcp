@@ -64,6 +64,17 @@ function newAccountId(label: string): string {
   return `${slug}-${crypto.randomBytes(3).toString("hex")}`;
 }
 
+export async function getAccountByPhone(phone: string): Promise<FoldAccount | null> {
+  const result = await getTurso().execute({
+    sql: `SELECT * FROM fold_accounts WHERE phone = ? ORDER BY created_at ASC LIMIT 1`,
+    args: [phone],
+  });
+  if (result.rows.length === 0) return null;
+  const obj: any = {};
+  result.columns.forEach((c, i) => { obj[c] = (result.rows[0] as any)[i]; });
+  return rowToAccount(obj);
+}
+
 export async function createAccount(label: string, phone: string): Promise<FoldAccount> {
   const id = newAccountId(label);
   await getTurso().execute({
