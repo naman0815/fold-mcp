@@ -204,6 +204,25 @@ Claude calls `add_fold_account` then `verify_fold_account_otp` once you give it 
 | `get_tax_year_report` | Full April–March financial year report (income, spending, savings rate) |
 | `get_spending_streak` | How many consecutive days you've stayed under a daily spending limit |
 
+**Investments — mutual funds, stocks, EPF, NPS, PPF, fixed deposits**
+
+Live-fetched from Fold on every call (not synced to a database) — always reflects the current NAV/price, not a stale snapshot.
+
+| Tool | What it does |
+|---|---|
+| `get_investments_summary` | One-shot net-worth view across all linked investments |
+| `get_mutual_funds` | Per-scheme holdings: units, value, invested amount, gain/loss, XIRR |
+| `get_stock_holdings` | Per-stock demat holdings: units, last traded price, value |
+| `get_epf_balance` | Current EPF balance: UAN, employer/employee/pension split, interest rate |
+| `get_epf_history` | Year-wise EPF contribution and interest history |
+| `get_nps_accounts` | Linked NPS accounts and their value |
+| `get_ppf_accounts` | Linked PPF accounts and their balance |
+| `get_fixed_deposits` | Active and archived fixed deposits: principal, maturity amount, interest |
+| `get_net_worth` | Total net worth across all linked sources, and its 30-day change |
+| `get_mutual_fund_refresh_status` | When your MF holdings were last pulled from CAMS/KFintech and when you're next eligible (Fold enforces a cooldown — 14 days free, 5 days Plus) — does not trigger a pull |
+| `explain_mutual_fund_performance` | Beginner-friendly per-scheme verdict: is each fund beating or lagging its benchmark |
+| `explain_portfolio_health` | Beginner-friendly read on concentration risk, asset mix, and overall returns vs benchmark |
+
 **Multi-account management — `main` branch only**
 
 | Tool | What it does |
@@ -231,6 +250,11 @@ Claude calls `add_fold_account` then `verify_fold_account_otp` once you give it 
 - "Compare this month's spending vs last month"
 - "Am I on track with my spending this month?"
 - "Which day of the week do I spend the most?"
+- "What's my total net worth right now?"
+- "How are my mutual funds doing — am I beating the market?"
+- "Is my portfolio healthy or too concentrated in one place?"
+- "What's my EPF balance?"
+- "When can I next refresh my mutual fund data?"
 
 ---
 
@@ -259,6 +283,8 @@ fold-mcp/build/index.js      — Node.js process, read-only SQLite access
 
 The MCP server only reads from SQLite. All writes go through the Go CLI, which handles auth token refresh automatically before every sync.
 
+Investment tools (mutual funds, stocks, EPF, NPS, PPF, fixed deposits) don't touch SQLite at all — each call shells out to `unfold_patched investments --json`, which hits Fold live and returns a fresh snapshot straight to Claude.
+
 **Option B — `main`:**
 
 ```
@@ -283,6 +309,8 @@ fold-mcp/build/index.js  <-----------------------+
 ```
 
 Every tool call resolves which linked Fold account it's for, then reads/writes Turso scoped to that account — the same database backs both the stdio and HTTP entry points.
+
+Investment tools skip Turso entirely — each call materializes that account's temp config, shells out to `unfold_patched investments --json` for a live snapshot, and returns it directly; nothing is persisted.
 
 ---
 
