@@ -27,7 +27,7 @@ func init() {
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.config/unfold/config.yaml)")
 	rootCmd.PersistentFlags().BoolVarP(&enableDebug, "debug", "v", os.Getenv("DEBUG") == "true", "Enable debug mode")
-	rootCmd.AddCommand(LoginCmd, RefreshCmd, UserCmd, AvailabilityCmd, TransactionsCmd)
+	rootCmd.AddCommand(LoginCmd, RefreshCmd, UserCmd, AvailabilityCmd, TransactionsCmd, InvestmentsCmd)
 }
 
 func initConfig() {
