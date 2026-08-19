@@ -6,6 +6,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import yaml from "js-yaml";
 import { getTurso, loadSqlJsDatabase, invalidateFtsCache } from "./db.js";
+import type { InvestmentsData } from "./investments.js";
 
 // ─── Paths (same resolution the old index.ts used for the Go binary) ────────
 const __filename = fileURLToPath(import.meta.url);
@@ -309,6 +310,30 @@ export async function runSync(accountId: string, from: string, to: string): Prom
       return { synced: rows.length };
     } finally {
       fs.rmSync(tmpDbPath, { force: true });
+    }
+  });
+}
+
+// ─── Investments (mutual funds / stocks / EPF / NPS / PPF / FDs) ─────────────
+// Unlike transactions, investment data is a current-state snapshot, not a growing
+// ledger — so there's no DB sync step, just a live fetch per call via the CLI's
+// `investments --json` bridge (see unfold_cli/cmd/investments.go).
+export async function getInvestments(accountId: string): Promise<InvestmentsData> {
+  const account = await getAccountRow(accountId);
+  if (!account) throw new Error(`Unknown Fold account id: ${accountId}`);
+
+  return withTempConfig(accountId, async (tmpConfigPath) => {
+    const { code, stdout, stderr } = await runCli(
+      ["investments", "--json", "--config", tmpConfigPath],
+      60_000
+    );
+    if (code !== 0) {
+      throw new Error(`Failed to fetch investments for ${account.label}: ${stderr.trim() || "unknown error"}`);
+    }
+    try {
+      return JSON.parse(stdout.trim());
+    } catch {
+      throw new Error(`Failed to parse investments output: ${stdout.slice(0, 200)}`);
     }
   });
 }

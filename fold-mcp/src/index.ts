@@ -19,6 +19,7 @@ import express from "express";
 import { fileURLToPath } from "url";
 import { runQuery, runQueryManual, runFtsQuery, rebuildFtsIfStale, withAccount } from "./db.js";
 import * as accounts from "./accounts.js";
+import { INVESTMENT_TOOL_NAMES, buildInvestmentsToolResult } from "./investments.js";
 import { config } from "./config.js";
 import { TursoOAuthProvider } from "./oauth/store.js";
 
@@ -588,6 +589,84 @@ const GET_SAVINGS_RATE_TOOL: Tool = {
   }
 };
 
+// ─── Investment tools (mutual funds / stocks / EPF / NPS / PPF / FDs) ────────
+const GET_INVESTMENTS_SUMMARY_TOOL: Tool = {
+  name: "get_investments_summary",
+  description: "One-shot net-worth view across all linked investments: mutual funds, stocks (demat), EPF, NPS, and fixed deposits.",
+  inputSchema: { type: "object", properties: {} }
+};
+
+const GET_MUTUAL_FUNDS_TOOL: Tool = {
+  name: "get_mutual_funds",
+  description: "Per-scheme mutual fund holdings: units, current value, invested amount, gain/loss, and XIRR.",
+  inputSchema: { type: "object", properties: {} }
+};
+
+const GET_STOCK_HOLDINGS_TOOL: Tool = {
+  name: "get_stock_holdings",
+  description: "Per-stock demat holdings: units, last traded price, and current value.",
+  inputSchema: { type: "object", properties: {} }
+};
+
+const GET_EPF_BALANCE_TOOL: Tool = {
+  name: "get_epf_balance",
+  description: "Current EPF balance: UAN, employer/employee/pension share split, interest earned, and current interest rate.",
+  inputSchema: { type: "object", properties: {} }
+};
+
+const GET_EPF_HISTORY_TOOL: Tool = {
+  name: "get_epf_history",
+  description: "Year-wise EPF contribution and interest history from the passbook.",
+  inputSchema: { type: "object", properties: {} }
+};
+
+const GET_NPS_ACCOUNTS_TOOL: Tool = {
+  name: "get_nps_accounts",
+  description: "Linked National Pension System (NPS) accounts and their value.",
+  inputSchema: { type: "object", properties: {} }
+};
+
+const GET_PPF_ACCOUNTS_TOOL: Tool = {
+  name: "get_ppf_accounts",
+  description: "Linked Public Provident Fund (PPF) accounts and their balance.",
+  inputSchema: { type: "object", properties: {} }
+};
+
+const GET_FIXED_DEPOSITS_TOOL: Tool = {
+  name: "get_fixed_deposits",
+  description: "Active and archived fixed deposits: principal, maturity amount, and interest.",
+  inputSchema: { type: "object", properties: {} }
+};
+
+const GET_NET_WORTH_TOOL: Tool = {
+  name: "get_net_worth",
+  description: "Total net worth (across all linked sources) and how it's changed over the last 30 days.",
+  inputSchema: { type: "object", properties: {} }
+};
+
+const GET_MUTUAL_FUND_REFRESH_STATUS_TOOL: Tool = {
+  name: "get_mutual_fund_refresh_status",
+  description: "When your mutual fund holdings were last pulled from the RTA (CAMS/KFintech) and when you're next eligible to pull again (Fold enforces a 14-day free / 5-day Plus cooldown on this). Does not trigger a pull — eligibility check only. Note this is unrelated to NAV pricing, which updates automatically every day regardless.",
+  inputSchema: { type: "object", properties: {} }
+};
+
+const EXPLAIN_MUTUAL_FUND_PERFORMANCE_TOOL: Tool = {
+  name: "explain_mutual_fund_performance",
+  description: "Beginner-friendly, per-scheme verdict on whether each mutual fund is beating or lagging its benchmark, over a chosen period. Flags the best and worst performer. Use this when the user doesn't know how to read fund performance numbers themselves.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      period: { type: "string", description: "Comparison period: '6M', '1Y', '3Y', '5Y', or '10Y'. Defaults to '1Y'." }
+    }
+  }
+};
+
+const EXPLAIN_PORTFOLIO_HEALTH_TOOL: Tool = {
+  name: "explain_portfolio_health",
+  description: "Beginner-friendly read on overall portfolio health: concentration risk (too much in one AMC/stock), asset-class mix, and whether returns are beating benchmarks. Use this when the user asks something like 'is my portfolio doing well?' or 'how are my investments doing?'.",
+  inputSchema: { type: "object", properties: {} }
+};
+
 // ─── Multi-account tools ──────────────────────────────────────────────────────
 const LIST_FOLD_ACCOUNTS_TOOL: Tool = {
   name: "list_fold_accounts",
@@ -646,6 +725,10 @@ for (const tool of [
   GET_RECURRING_MERCHANTS_TOOL, COMPARE_PERIODS_TOOL, GET_SPENDING_FORECAST_TOOL,
   GET_ACCOUNT_BREAKDOWN_TOOL, GET_DAY_OF_WEEK_PATTERNS_TOOL, FULL_TEXT_SEARCH_TOOL,
   EXPORT_TRANSACTIONS_CSV_TOOL, GET_SAVINGS_RATE_TOOL,
+  GET_INVESTMENTS_SUMMARY_TOOL, GET_MUTUAL_FUNDS_TOOL, GET_STOCK_HOLDINGS_TOOL,
+  GET_EPF_BALANCE_TOOL, GET_EPF_HISTORY_TOOL, GET_NPS_ACCOUNTS_TOOL, GET_PPF_ACCOUNTS_TOOL,
+  GET_FIXED_DEPOSITS_TOOL, GET_NET_WORTH_TOOL, GET_MUTUAL_FUND_REFRESH_STATUS_TOOL,
+  EXPLAIN_MUTUAL_FUND_PERFORMANCE_TOOL, EXPLAIN_PORTFOLIO_HEALTH_TOOL,
 ]) {
   (tool.inputSchema.properties as Record<string, unknown>).account = {
     type: "string",
@@ -689,6 +772,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     FULL_TEXT_SEARCH_TOOL,
     EXPORT_TRANSACTIONS_CSV_TOOL,
     GET_SAVINGS_RATE_TOOL,
+    GET_INVESTMENTS_SUMMARY_TOOL,
+    GET_MUTUAL_FUNDS_TOOL,
+    GET_STOCK_HOLDINGS_TOOL,
+    GET_EPF_BALANCE_TOOL,
+    GET_EPF_HISTORY_TOOL,
+    GET_NPS_ACCOUNTS_TOOL,
+    GET_PPF_ACCOUNTS_TOOL,
+    GET_FIXED_DEPOSITS_TOOL,
+    GET_NET_WORTH_TOOL,
+    GET_MUTUAL_FUND_REFRESH_STATUS_TOOL,
+    EXPLAIN_MUTUAL_FUND_PERFORMANCE_TOOL,
+    EXPLAIN_PORTFOLIO_HEALTH_TOOL,
     LIST_FOLD_ACCOUNTS_TOOL,
     ADD_FOLD_ACCOUNT_TOOL,
     VERIFY_FOLD_ACCOUNT_OTP_TOOL,
@@ -751,6 +846,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // runQuery() call below via AsyncLocalStorage.
     const foldAccountId = await accounts.resolveAccountId(request.params.arguments?.account as string | undefined);
     return await withAccount(foldAccountId, async () => {
+    // ── investment tools ────────────────────────────────────────────────────
+    if (INVESTMENT_TOOL_NAMES.has(request.params.name)) {
+      const data = await accounts.getInvestments(foldAccountId);
+      return buildInvestmentsToolResult(request.params.name, request.params.arguments, data);
+    }
+
     // ── get_recent_transactions ─────────────────────────────────────────────
     if (request.params.name === "get_recent_transactions") {
       const limit = Math.min(Number(request.params.arguments?.limit ?? 20), 500);
