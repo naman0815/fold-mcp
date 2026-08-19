@@ -35,10 +35,6 @@ func Login(phone string) error {
 			return errors.New(resp.Status)
 		}
 
-		buf := new(bytes.Buffer)
-		buf.ReadFrom(resp.Body)
-		log.Debug().Msg("Login response: " + buf.String())
-
 		return nil
 	}
 }
@@ -97,7 +93,7 @@ func VerifyOtp(phone string, otp string) (string, string, error) {
 		// We don't care if this fails
 		data := VerifyOtpResponse{}
 		json.NewDecoder(resp.Body).Decode(&data)
-		log.Debug().Msgf("Verify OTP response: %+v", data)
+		log.Debug().Msgf("Verify OTP response: token_type=%s new_user=%v user_id=%s", data.Data.TokenType, data.Data.NewUser, data.Data.UserID)
 		return data.Data.AccessToken, data.Data.RefreshToken, nil
 	}
 }

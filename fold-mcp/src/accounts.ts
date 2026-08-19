@@ -123,6 +123,19 @@ export async function resolveAccountId(explicit?: string): Promise<string> {
   return active;
 }
 
+/**
+ * Strips anything that looks like a token/secret from CLI stderr/stdout before it's
+ * embedded in an Error surfaced to the MCP client. Defense-in-depth on top of the
+ * Go-side log redaction — catches any other sensitive-looking value (long base64/hex
+ * tokens, `"access_token": "..."`, etc). The 40+ char threshold on the second pattern
+ * keeps standard 36-char UUIDs (account ids) visible in error text for debugging.
+ */
+function scrubSecrets(s: string): string {
+  return s
+    .replace(/("?(?:access|refresh)_?token"?\s*[:=]\s*)"?[A-Za-z0-9_\-.]{16,}"?/gi, "$1[redacted]")
+    .replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[redacted-token-like-value]");
+}
+
 // ─── Bridging to unfold_patched (Go CLI) ─────────────────────────────────────
 // Known quirk (verified in production, not something we've touched): on any
 // error path, unfold_cli logs the error and calls runtime.Goexit() rather than
@@ -145,7 +158,7 @@ function runCli(args: string[], timeoutMs: number): Promise<{ code: number; stdo
       child.kill();
       reject(new Error(
         `unfold_patched ${args.join(" ")} timed out after ${timeoutMs / 1000}s. ` +
-        `Partial stdout: ${stdout.trim() || "(none)"} | Partial stderr: ${stderr.trim() || "(none)"}`
+        `Partial stdout: ${scrubSecrets(stdout.trim()) || "(none)"} | Partial stderr: ${scrubSecrets(stderr.trim()) || "(none)"}`
       ));
     }, timeoutMs);
     child.on("close", (code) => { clearTimeout(timer); resolve({ code: code ?? -1, stdout, stderr }); });
@@ -174,6 +187,7 @@ async function materializeConfig(accountId: string): Promise<string> {
 
   const tmpPath = path.join(os.tmpdir(), `unfold-${accountId}-${crypto.randomUUID()}.yaml`);
   fs.writeFileSync(tmpPath, yaml.dump(data), "utf8");
+  fs.chmodSync(tmpPath, 0o600); // contains access/refresh tokens — don't leave it world-readable
   return tmpPath;
 }
 
@@ -226,7 +240,7 @@ export async function sendOtp(accountId: string): Promise<void> {
       ["login", "--phone", account.phone, "--send-otp", "--config", tmpConfigPath],
       75_000 // unfold_cli's own HTTP client times out at 60s — give it room to surface that error first
     );
-    if (code !== 0) throw new Error(`Failed to send OTP to ${account.phone}: ${stderr.trim() || "unknown error"}`);
+    if (code !== 0) throw new Error(`Failed to send OTP to ${account.phone}: ${scrubSecrets(stderr.trim()) || "unknown error"}`);
   });
 }
 
@@ -238,7 +252,7 @@ export async function verifyOtp(accountId: string, otp: string): Promise<void> {
       ["login", "--phone", account.phone, "--otp", otp, "--config", tmpConfigPath],
       75_000 // unfold_cli's own HTTP client times out at 60s — give it room to surface that error first
     );
-    if (code !== 0) throw new Error(`OTP verification failed: ${stderr.trim() || "unknown error"}`);
+    if (code !== 0) throw new Error(`OTP verification failed: ${scrubSecrets(stderr.trim()) || "unknown error"}`);
   });
 
   await getTurso().execute({ sql: `UPDATE fold_accounts SET status = 'active' WHERE id = ?`, args: [accountId] });
@@ -278,8 +292,9 @@ export async function runSync(accountId: string, from: string, to: string): Prom
         ["transactions", "-d", "--db-path", tmpDbPath, "--config", tmpConfigPath, "--since", from, "--till", to],
         120_000
       );
-      if (code !== 0) throw new Error(`Sync failed for ${account.label} (${from} → ${to}): ${stderr.trim() || "unknown error"}`);
+      if (code !== 0) throw new Error(`Sync failed for ${account.label} (${from} → ${to}): ${scrubSecrets(stderr.trim()) || "unknown error"}`);
       if (!fs.existsSync(tmpDbPath)) return { synced: 0 };
+      fs.chmodSync(tmpDbPath, 0o600); // close the window before we read transaction data out of it
 
       const buf = fs.readFileSync(tmpDbPath);
       const localDb = await loadSqlJsDatabase(buf);
@@ -328,7 +343,7 @@ export async function getInvestments(accountId: string): Promise<InvestmentsData
       60_000
     );
     if (code !== 0) {
-      throw new Error(`Failed to fetch investments for ${account.label}: ${stderr.trim() || "unknown error"}`);
+      throw new Error(`Failed to fetch investments for ${account.label}: ${scrubSecrets(stderr.trim()) || "unknown error"}`);
     }
     try {
       return JSON.parse(stdout.trim());

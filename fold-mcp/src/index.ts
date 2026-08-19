@@ -91,6 +91,20 @@ function truncate(s: string, max = 40): string {
   return s.length > max ? s.slice(0, max) + "…" : s;
 }
 
+/** Resolves a CSV export's outputPath, rejecting anything that would escape ~/Downloads. */
+function resolveExportPath(requested: string | undefined, defaultPath: string): string {
+  const base = path.resolve(os.homedir(), "Downloads");
+  const candidate = requested ? path.resolve(base, requested) : defaultPath;
+  const resolved = path.resolve(candidate);
+  const rel = path.relative(base, resolved);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    throw new Error(
+      `outputPath must resolve inside ${base}. Provide a filename or a relative path under Downloads, not an absolute path or one containing "..".`
+    );
+  }
+  return resolved;
+}
+
 function fmtAmount(n: number): string {
   return "₹" + Math.abs(n).toLocaleString("en-IN", { maximumFractionDigits: 0 });
 }
@@ -113,6 +127,32 @@ function formatTransaction(t: any): string {
   const modeStr = t.mode ? ` | ${t.mode}` : "";
   const accountStr = t.account ? ` | ${truncate(t.account, 15)}` : "";
   return `${(t.timestamp as string).slice(0, 10)} | ${sign}${fmtAmount(t.amount)} | ${merchant}${accountStr}${modeStr} | ${category}${tagsStr} [ID: ${t.uuid}]`;
+}
+
+// ─── Background-sync keep-alive (HTTP transport only) ────────────────────────
+// sync_fold_data intentionally doesn't await its background sync (see below), so
+// the MCP response returns immediately — but on Render's free tier, inactivity
+// (no inbound HTTP traffic) can spin the instance down mid-sync, silently killing
+// it. Self-pinging /healthz while a sync is in flight counts as inbound traffic
+// and keeps the instance alive for the duration; it's a no-op on stdio (local-mcp
+// doesn't have this deployment risk at all).
+let activeSyncCount = 0;
+let keepAliveTimer: NodeJS.Timeout | null = null;
+
+function startKeepAliveIfNeeded(): void {
+  activeSyncCount++;
+  if (keepAliveTimer || process.env.MCP_TRANSPORT !== "http") return;
+  keepAliveTimer = setInterval(() => {
+    fetch(`http://127.0.0.1:${config.port}/healthz`).catch(() => {});
+  }, 4 * 60 * 1000); // well under Render's ~15-min inactivity window
+}
+
+function stopKeepAliveIfDone(): void {
+  activeSyncCount = Math.max(0, activeSyncCount - 1);
+  if (activeSyncCount === 0 && keepAliveTimer) {
+    clearInterval(keepAliveTimer);
+    keepAliveTimer = null;
+  }
 }
 
 /** Run a single unfold_patched sync for [from, to] against one Fold account, then upsert into Turso. */
@@ -952,7 +992,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       let text = `Spending summary (${startDate} → ${endDate})${xferNote}:\n` +
         `- Total Incoming:   ${fmtAmount(incoming)}\n` +
         `- Total Outgoing:   ${fmtAmount(outgoing)}\n` +
-        `- Net:              ${outgoing <= incoming ? "+" : ""}${fmtAmount(incoming - outgoing)}\n` +
+        `- Net:              ${outgoing <= incoming ? "+" : "-"}${fmtAmount(incoming - outgoing)}\n` +
         `- Transactions:     ${summary.tx_count || 0}\n` +
         `- Avg Daily Spend:  ${fmtAmount(outgoing / days)}\n`;
 
@@ -981,13 +1021,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // plain async call, not awaited — accounts.runSync takes foldAccountId
       // explicitly rather than reading it from context, so it keeps running
       // correctly after this request handler returns.
+      startKeepAliveIfNeeded();
       runBatchesConcurrent(foldAccountId, batches, 3, (_idx, from, to, result) => {
         if (result instanceof Error) {
           console.error(`sync_fold_data: batch ${from} → ${to} failed: ${result.message}`);
         } else {
           console.error(`sync_fold_data: batch ${from} → ${to} — ${result}`);
         }
-      }).catch((err) => console.error("sync_fold_data: background sync failed:", err));
+      })
+        .catch((err) => console.error("sync_fold_data: background sync failed:", err))
+        .finally(() => stopKeepAliveIfDone());
 
       const mins = Math.ceil(estimatedSecs / 60);
       const lines = [
@@ -1111,13 +1154,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         totalIn  += r.incoming;
         totalOut += r.outgoing;
         const net = r.incoming - r.outgoing;
-        const netStr = (net >= 0 ? "+" : "") + fmtAmount(net);
+        const netStr = (net >= 0 ? "+" : "-") + fmtAmount(net);
         text += `${r.month}  | ${pad(fmtAmount(r.incoming), 13)} | ${pad(fmtAmount(r.outgoing), 13)} | ${pad(netStr, 13)} | ${r.tx_count}\n`;
       });
 
       text += `---------|---------------|---------------|---------------|----- \n`;
       const totalNet = totalIn - totalOut;
-      text += `TOTAL    | ${pad(fmtAmount(totalIn), 13)} | ${pad(fmtAmount(totalOut), 13)} | ${pad((totalNet >= 0 ? "+" : "") + fmtAmount(totalNet), 13)} |\n`;
+      text += `TOTAL    | ${pad(fmtAmount(totalIn), 13)} | ${pad(fmtAmount(totalOut), 13)} | ${pad((totalNet >= 0 ? "+" : "-") + fmtAmount(totalNet), 13)} |\n`;
 
       return { content: [{ type: "text", text }] };
     }
@@ -1384,7 +1427,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       text += "─".repeat(50) + "\n\n";
       text += `Total income:    ${fmtAmount(incoming)}\n`;
       text += `Total spending:  ${fmtAmount(outgoing)}\n`;
-      text += `Net savings:     ${savings >= 0 ? "+" : ""}${fmtAmount(savings)}\n`;
+      text += `Net savings:     ${savings >= 0 ? "+" : "-"}${fmtAmount(savings)}\n`;
       text += `Savings rate:    ${savingsRate}%\n`;
       text += `Transactions:    ${(summary.tx_count as number).toLocaleString()}\n\n`;
 
@@ -1393,7 +1436,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         for (const r of monthRows) {
           const net = r.incoming - r.outgoing;
           const pad = (s: string) => s.padStart(12);
-          text += `  ${r.month}  In: ${pad(fmtAmount(r.incoming))}  Out: ${pad(fmtAmount(r.outgoing))}  Net: ${pad((net >= 0 ? "+" : "") + fmtAmount(net))}\n`;
+          text += `  ${r.month}  In: ${pad(fmtAmount(r.incoming))}  Out: ${pad(fmtAmount(r.outgoing))}  Net: ${pad((net >= 0 ? "+" : "-") + fmtAmount(net))}\n`;
         }
         text += "\n";
       }
@@ -1655,8 +1698,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const rows2 = [
         ["Spending",    fmtAmount(p1.outgoing),        fmtAmount(p2.outgoing),        pctChange(p1.outgoing, p2.outgoing)],
         ["Income",      fmtAmount(p1.incoming),        fmtAmount(p2.incoming),        pctChange(p1.incoming, p2.incoming)],
-        ["Net",         (p1.incoming - p1.outgoing >= 0 ? "+" : "") + fmtAmount(p1.incoming - p1.outgoing),
-                        (p2.incoming - p2.outgoing >= 0 ? "+" : "") + fmtAmount(p2.incoming - p2.outgoing), ""],
+        ["Net",         (p1.incoming - p1.outgoing >= 0 ? "+" : "-") + fmtAmount(p1.incoming - p1.outgoing),
+                        (p2.incoming - p2.outgoing >= 0 ? "+" : "-") + fmtAmount(p2.incoming - p2.outgoing), ""],
         ["Avg/day",     fmtAmount(p1.outgoing / p1.days), fmtAmount(p2.outgoing / p2.days), pctChange(p1.outgoing / p1.days, p2.outgoing / p2.days)],
         ["Transactions",String(p1.tx_count),            String(p2.tx_count),            pctChange(p1.tx_count, p2.tx_count)],
       ];
@@ -1756,7 +1799,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         text += `Account ${i + 1}  [${shortId}]\n`;
         text += `  Spending:  ${fmtAmount(r.outgoing)}\n`;
         text += `  Income:    ${fmtAmount(r.incoming)}\n`;
-        text += `  Net:       ${net >= 0 ? "+" : ""}${fmtAmount(net)}\n`;
+        text += `  Net:       ${net >= 0 ? "+" : "-"}${fmtAmount(net)}\n`;
         text += `  Txns:      ${r.tx_count}  |  Last active: ${r.last_activity}\n\n`;
       });
 
@@ -1845,6 +1888,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return { content: [{ type: "text", text: "Please provide a search query." }] };
       }
 
+      // Ensure the FTS index reflects the latest synced rows even if get_sync_status
+      // was never called — otherwise a fresh/stale index just returns "no matches".
+      await rebuildFtsIfStale().catch(() => {});
+
       let uuids: string[];
 
       try {
@@ -1918,7 +1965,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       const today = new Date().toISOString().slice(0, 10);
       const defaultPath = path.join(os.homedir(), "Downloads", `fold-export-${today}.csv`);
-      const outputPath  = (request.params.arguments?.outputPath as string) || defaultPath;
+      const outputPath  = resolveExportPath(request.params.arguments?.outputPath as string | undefined, defaultPath);
 
       const conditions: string[] = [];
       const params: any[] = [];
@@ -1944,6 +1991,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ? `"${s.replace(/"/g, '""')}"`
           : s;
       };
+      // Text fields sourced from merchant/bank data are attacker/externally influenceable —
+      // neutralize a leading =/+/-/@ so opening the export in Excel/Sheets can't execute a formula.
+      const escapeText = (v: string | number | null) => {
+        let s = String(v ?? "");
+        if (/^[=+\-@]/.test(s)) s = "'" + s;
+        return escape(s);
+      };
 
       const header = "date,merchant,narration,amount,type,mode,account_id,category,tags";
       const csvLines = [header];
@@ -1952,14 +2006,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const tags = parseTags(r.tags).join(";");
         csvLines.push([
           escape(r.date),
-          escape(cleanMerchant(merchantRaw)),
-          escape(r.narration || ""),
+          escapeText(cleanMerchant(merchantRaw)),
+          escapeText(r.narration || ""),
           escape(r.amount),
           escape(r.type),
           escape(r.mode || ""),
           escape(r.account_id),
-          escape(categorize(r.category, merchantRaw)),
-          escape(tags),
+          escapeText(categorize(r.category, merchantRaw)),
+          escapeText(tags),
         ].join(","));
       }
 
@@ -2050,7 +2104,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const r3 = rolling3[i];
         const r3Str = r3 !== null ? `${r3.toFixed(1)}%` : "—";
         const flag = m.savings < 0 ? " ⚠️" : "";
-        text += `${m.month}  | ${fmtAmount(m.incoming).padStart(13)} | ${fmtAmount(m.outgoing).padStart(13)} | ${(m.savings >= 0 ? "+" : "") + fmtAmount(m.savings).padStart(12)} | ${rateStr.padStart(7)} | ${r3Str.padStart(7)}${flag}\n`;
+        text += `${m.month}  | ${fmtAmount(m.incoming).padStart(13)} | ${fmtAmount(m.outgoing).padStart(13)} | ${(m.savings >= 0 ? "+" : "-") + fmtAmount(m.savings).padStart(12)} | ${rateStr.padStart(7)} | ${r3Str.padStart(7)}${flag}\n`;
       });
 
       if (negMonths.length > 0) {

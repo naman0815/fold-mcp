@@ -51,7 +51,7 @@ func Refresh(refresh string) (string, string, error) {
 
 		data := RefreshResponse{}
 		json.NewDecoder(resp.Body).Decode(&data)
-		log.Debug().Msgf("Verify OTP response: %+v", data)
+		log.Debug().Msgf("Refresh response: token_type=%s expires_at=%s", data.Data.TokenType, data.Data.ExpiresAt)
 		return data.Data.AccessToken, data.Data.RefreshToken, nil
 	}
 }

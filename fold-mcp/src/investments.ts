@@ -184,14 +184,17 @@ export function buildInvestmentsToolResult(name: string, args: Record<string, an
     case "get_mutual_fund_refresh_status": {
       const status = data.mf_refresh_status?.data;
       if (!status) return textResult("Refresh status unavailable.");
-      const next = new Date(status.recent_session_status?.next_refresh);
-      const now = new Date();
-      const eligible = next.getTime() <= now.getTime();
+      const rawNext = status.recent_session_status?.next_refresh;
+      const next = rawNext ? new Date(rawNext) : null;
+      const hasValidNext = next !== null && !isNaN(next.getTime()) && next.getTime() > 0;
+      const eligible = hasValidNext ? next!.getTime() <= Date.now() : null;
       const lines = [
         `Mutual fund holdings were last pulled from your RTA (CAMS/KFintech) on ${String(status.recent_session_status?.last_refresh).slice(0, 10)}.`,
-        eligible
-          ? `You're eligible to pull again now.`
-          : `Next eligible pull: ${String(status.recent_session_status?.next_refresh).slice(0, 10)} (Fold enforces this cooldown — 14 days on free, 5 on Plus).`,
+        eligible === null
+          ? `Refresh eligibility unclear (no valid next-refresh date reported by Fold).`
+          : eligible
+            ? `You're eligible to pull again now.`
+            : `Next eligible pull: ${String(rawNext).slice(0, 10)} (Fold enforces this cooldown — 14 days on free, 5 on Plus).`,
         ``,
         `Note: this is only about pulling in new transactions (new purchases/redemptions). NAV pricing on your existing units updates automatically every day` +
           (status.last_nav_updated_at ? ` — last updated ${String(status.last_nav_updated_at).slice(0, 10)}.` : "."),

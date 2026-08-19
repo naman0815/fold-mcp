@@ -13,11 +13,41 @@ import { getTurso } from "../db.js";
 import { config } from "../config.js";
 import { renderLoginPage } from "./loginPage.js";
 
-const ACCESS_TOKEN_TTL_SECONDS = 90 * 24 * 3600; // long-lived: small trusted group, refresh rotation covers renewal
+const ACCESS_TOKEN_TTL_SECONDS = 30 * 24 * 3600; // small trusted group; shorter than before to limit blast radius of a leaked token, refresh rotation covers renewal
 const AUTH_CODE_TTL_SECONDS = 5 * 60;
+const ORPHANED_CLIENT_GRACE_SECONDS = 24 * 3600; // registered but never completed /authorize within this window gets swept
 
 function nowSeconds(): number {
   return Math.floor(Date.now() / 1000);
+}
+
+/** Reclaims expired oauth_codes/oauth_tokens rows. Fire-and-forget on the hot path — never blocks a request. */
+async function purgeExpired(): Promise<void> {
+  const now = nowSeconds();
+  await getTurso().batch(
+    [
+      { sql: `DELETE FROM oauth_codes WHERE expires_at < ?`, args: [now] },
+      { sql: `DELETE FROM oauth_tokens WHERE expires_at < ?`, args: [now] },
+    ],
+    "write"
+  );
+}
+
+/**
+ * Dynamic Client Registration is left open (registration is metadata-only and grants
+ * no access by itself — /authorize still requires the shared password), but an open
+ * DCR endpoint lets anyone accumulate oauth_clients rows via enumeration/abuse. Sweep
+ * client registrations that never went on to complete /authorize (no oauth_tokens ever
+ * issued to them) once they're past a grace period.
+ */
+async function purgeOrphanedClients(): Promise<void> {
+  const cutoff = nowSeconds() - ORPHANED_CLIENT_GRACE_SECONDS;
+  await getTurso().execute({
+    sql: `DELETE FROM oauth_clients
+          WHERE client_id NOT IN (SELECT DISTINCT client_id FROM oauth_tokens)
+            AND CAST(json_extract(metadata_json, '$.client_id_issued_at') AS INTEGER) < ?`,
+    args: [cutoff],
+  });
 }
 
 function randomToken(): string {
@@ -81,6 +111,9 @@ export class TursoOAuthProvider implements OAuthServerProvider {
       res.status(401).type("html").send(renderLoginPage({ client, params, error: "Incorrect password." }));
       return;
     }
+
+    purgeExpired().catch(() => {});
+    purgeOrphanedClients().catch(() => {});
 
     const code = randomToken();
     await getTurso().execute({
@@ -188,6 +221,7 @@ export class TursoOAuthProvider implements OAuthServerProvider {
   }
 
   private async issueTokens(clientId: string, scopes: string[]): Promise<OAuthTokens> {
+    purgeExpired().catch(() => {});
     const accessToken = randomToken();
     const refreshToken = randomToken();
     await getTurso().execute({
