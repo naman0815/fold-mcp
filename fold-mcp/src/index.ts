@@ -17,7 +17,7 @@ import crypto from "crypto";
 import express from "express";
 
 import { fileURLToPath } from "url";
-import { runQuery, runQueryManual, runFtsQuery, rebuildFtsIfStale, withAccount } from "./db.js";
+import { runQuery, runQueryManual, runFtsQuery, rebuildFtsIfStale, withAccount } from "./storage/turso.js";
 import * as accounts from "./accounts.js";
 import { INVESTMENT_TOOL_NAMES, buildInvestmentsToolResult } from "./investments.js";
 import { config } from "./config.js";

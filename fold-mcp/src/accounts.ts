@@ -5,7 +5,7 @@ import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
 import yaml from "js-yaml";
-import { getTurso, loadSqlJsDatabase, invalidateFtsCache } from "./db.js";
+import { getTurso, loadSqlJsDatabase, invalidateFtsCache } from "./storage/turso.js";
 import type { InvestmentsData } from "./investments.js";
 
 // ─── Paths (same resolution the old index.ts used for the Go binary) ────────

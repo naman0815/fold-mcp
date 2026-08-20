@@ -2,7 +2,7 @@ import { createClient, type Client } from "@libsql/client";
 import { AsyncLocalStorage } from "node:async_hooks";
 import initSqlJs from "sql.js";
 import type { Database, SqlJsStatic } from "sql.js";
-import { config } from "./config.js";
+import { config } from "../config.js";
 
 /**
  * Turso (libSQL) is the single source of truth for transaction data and

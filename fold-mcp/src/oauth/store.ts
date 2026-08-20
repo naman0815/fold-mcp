@@ -9,7 +9,7 @@ import type { OAuthRegisteredClientsStore } from "@modelcontextprotocol/sdk/serv
 import type { OAuthServerProvider, AuthorizationParams } from "@modelcontextprotocol/sdk/server/auth/provider.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { InvalidGrantError, InvalidTokenError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
-import { getTurso } from "../db.js";
+import { getTurso } from "../storage/turso.js";
 import { config } from "../config.js";
 import { renderLoginPage } from "./loginPage.js";
 
