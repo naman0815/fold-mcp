@@ -1,0 +1,21 @@
+# Render Blueprint — lets someone deploy this service with one click
+# ("Deploy to Render" button in README.md) instead of the manual New → Web
+# Service wizard. Render reads this file, provisions the service from the
+# repo's Dockerfile, and prompts for the three secrets below during setup —
+# everything else (port, transport mode, public URL) is either fixed in the
+# Dockerfile or auto-detected by the app itself (see config.ts's
+# RENDER_EXTERNAL_URL fallback for PUBLIC_BASE_URL).
+services:
+  - type: web
+    name: fold-mcp
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    envVars:
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
+      - key: MCP_SHARED_PASSWORD
+        sync: false

@@ -1,22 +1,39 @@
 # Unfold MCP
 
-An unofficial MCP server for [Fold Money](https://fold.money) that lets you query and analyze your spending data directly from Claude.
+An unofficial MCP server for [Fold Money](https://fold.money) that lets you ask Claude about your spending, investments, and net worth directly — no spreadsheets, no exporting data by hand.
 
-By default, everything runs locally — a local SQLite file, one Fold login, no cloud account of any kind. Reaching it from your phone or browser (not just Claude Desktop/Code), or linking more than one Fold account, is entirely optional and only kicks in if you set it up — see [Optional: multi-account & remote access](#optional-multi-account--remote-access-turso--render) below. You don't need to decide anything up front; the default setup below is the whole story for most people.
+There are two ways to set it up. Pick whichever matches what you want:
+
+| | **Setup 1: Local Only** | **Setup 2: Local, Mobile, and Browser** |
+|---|---|---|
+| Works with | Claude Desktop app, Claude Code (on this computer only) | All of that, **plus** the Claude app on your phone and claude.ai in any browser |
+| Your data lives | A file on your own computer — never sent anywhere else | A private database you own (free tier), so it's reachable from your phone too |
+| Fold accounts | One | More than one, if you want |
+| Setup time | ~5 minutes, nothing to sign up for | ~10 minutes, one free account to create |
+| Pick this if | You just want to ask Claude about your money on your laptop | You want that from your phone too, or need more than one Fold account |
+
+Not sure? Start with **Setup 1** — it's simpler, and you can always add Setup 2 on top later without redoing anything.
 
 ---
 
-## Quick Setup (one prompt)
+## Setup 1: Local Only (Desktop and Code CLI)
 
-Create an empty folder, open **Claude Code** inside it, and paste the prompt from [bootstrap_claude_code.md](./bootstrap_claude_code.md). Claude will clone the repo, install dependencies, build everything, log you in, and configure Claude Desktop automatically. The only things you type are your phone number and the OTP.
+Everything runs on your computer. No accounts to create beyond Fold itself, nothing sent to any other service.
 
----
+### If you're not a developer (recommended)
 
-## Manual Setup
+1. Create a new empty folder on your computer.
+2. Open **Claude Code** inside that folder. (Don't have it? [Get it here](https://claude.ai/download) — it's Claude's terminal app.)
+3. Open [bootstrap_claude_code.md](./bootstrap_claude_code.md), copy the whole prompt block, and paste it into Claude Code.
+4. Claude does everything else — installing what it needs, building the project, connecting to Claude Desktop. You'll only be asked for two things: your phone number, and the OTP code Fold texts you.
+
+That's it. Once it's done, open Claude Desktop and ask something like *"Sync my Fold data from 2021-01-01 to today."*
+
+### If you'd rather run the commands yourself
 
 **Requirements:** Node.js v18+, Go 1.20+, [Claude Desktop](https://claude.ai/download), a Fold account (India only).
 
-### 1. Clone and build
+**1. Clone and build**
 
 ```bash
 git clone https://github.com/naman0815/unfold-mcp.git fold-mcp
@@ -31,7 +48,7 @@ cd unfold_cli && go build -o ../unfold_patched . && cd ..
 
 > **No build tools required.** `npm install` downloads a pure WebAssembly SQLite — no Xcode, no native compilation.
 
-### 2. Log in to Fold
+**2. Log in to Fold**
 
 ```bash
 ./unfold_patched login
@@ -39,7 +56,7 @@ cd unfold_cli && go build -o ../unfold_patched . && cd ..
 
 You'll be prompted for your phone number and an OTP. Tokens are stored at `~/.config/unfold/config.yaml`.
 
-### 3. Configure Claude Desktop
+**3. Configure Claude Desktop**
 
 Find your config file:
 - **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
@@ -62,11 +79,99 @@ Use the full path to `node` (run `which node` on macOS or `(Get-Command node).So
 
 Quit and relaunch Claude Desktop to pick up the new config.
 
-### 4. Sync your transaction history
+**4. Sync your transaction history**
 
 Ask Claude: *"Sync my Fold data from 2021-01-01 to today"*. Each year syncs in about 10 seconds and up to 3 years run in parallel.
 
 **Staying up to date:** `git pull` then `cd fold-mcp && npm run build`, or just ask Claude *"Are there any updates available?"* — `check_for_updates` checks GitHub and tells you the exact command to run.
+
+---
+
+## Setup 2: Local, Mobile, and Browser
+
+Same server, pointed at a small free cloud database instead of a local file — that's what lets Claude's phone app and browser reach it, and lets you link more than one Fold account. Everything from Setup 1 still works exactly the same.
+
+This has two parts, and you only need the second one if you actually want phone/browser access:
+
+- **Part A — multi-account, still on your computer:** creates your free database and switches Claude Desktop/Code over to it. Mostly automatic.
+- **Part B — phone and browser access (optional):** deploys a copy of the server to a free hosting service ([Render](https://render.com)) so it's reachable from anywhere. This part genuinely can't be fully automated (creating a Render account requires you, in a browser), but it's a single click, not a manual walkthrough.
+
+### Part A: Multi-account setup
+
+#### If you're not a developer (recommended)
+
+1. Create a new empty folder on your computer.
+2. Open **Claude Code** inside that folder.
+3. Open [bootstrap_claude_code_remote.md](./bootstrap_claude_code_remote.md), copy the prompt block, and paste it into Claude Code.
+4. Claude does everything, including creating your free database — the one thing it can't do for you is one login click in a browser tab that pops up (that's how the database provider's login works). Then it'll ask for your phone number and OTP, same as Setup 1.
+
+#### If you'd rather run the commands yourself
+
+**Additional requirements:** Node.js v18+, Go 1.20+, a [Turso](https://turso.tech) account (free tier is enough).
+
+**1. Clone and build** — same as Setup 1's manual steps above (clone, `npm install && npm run build`, build the Go CLI).
+
+**2. Create the Turso database**
+
+```bash
+turso db create fold-mcp
+turso db show fold-mcp                       # note the URL
+turso db tokens create fold-mcp               # note the auth token
+turso db shell fold-mcp < fold-mcp/schema/turso.sql
+```
+
+**3. Configure environment variables**
+
+```bash
+cp fold-mcp/.env.example fold-mcp/.env
+```
+
+Fill in `fold-mcp/.env`:
+
+| Variable | Value |
+|---|---|
+| `TURSO_DATABASE_URL` | from `turso db show` |
+| `TURSO_AUTH_TOKEN` | from `turso db tokens create` |
+
+(Leave `MCP_SHARED_PASSWORD` and `PUBLIC_BASE_URL` blank for now — those are only for Part B below.)
+
+**4. Configure Claude Desktop**, same as Setup 1 but with the Turso credentials passed through `env` since there's no local config file for them to live in otherwise:
+
+```json
+{
+  "mcpServers": {
+    "fold": {
+      "command": "/opt/homebrew/bin/node",
+      "args": ["/absolute/path/to/fold-mcp/fold-mcp/build/index.js"],
+      "env": {
+        "TURSO_DATABASE_URL": "libsql://...",
+        "TURSO_AUTH_TOKEN": "..."
+      }
+    }
+  }
+}
+```
+
+**5. Link your Fold account(s)** — there's no `unfold_patched login` step here, it's done through Claude instead:
+
+> Add my Fold account with phone number +91XXXXXXXXXX, then send me the OTP prompt
+
+Claude calls `add_fold_account` then `verify_fold_account_otp` once you give it the OTP. Repeat for a second phone number to link another account, and use `set_active_fold_account` (or the `account` argument on any tool) to switch between them.
+
+### Part B: Add phone and browser access (optional)
+
+Only do this if you actually want to reach your data from Claude's mobile app or claude.ai — Part A alone already gives you multi-account support on your laptop.
+
+1. Click the button below. Render will ask you to sign in (or create a free account) and will fork this repo into your own GitHub automatically — you don't need to push anything yourself first.
+
+   [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/naman0815/unfold-mcp)
+
+2. When prompted, paste in the two Turso values from Part A, plus a password of your choosing (this is what gates who can sign in to your server — pick something real, you'll type it once when connecting Claude). Nothing else needs configuring — port, transport mode, and the server's own URL are all handled automatically.
+3. Render builds and deploys. Once it's live, confirm: `curl https://<your-service>.onrender.com/healthz` should return `{"status":"ok"}`.
+4. In Claude (mobile app or claude.ai): **Settings → Connectors → Add custom connector**, and enter `https://<your-service>.onrender.com/mcp` as the URL. Claude will redirect you to a sign-in page — enter the password you set in step 2.
+5. Ask Claude to add your Fold account the same way as in Part A (`add_fold_account` → OTP → `verify_fold_account_otp`), then sync.
+
+> Free Render web services spin down when idle and take ~30-60s to wake on the first request after a while — expect a slow first message after inactivity.
 
 ---
 
@@ -132,7 +237,7 @@ Live-fetched from Fold on every call (not synced to a database) — always refle
 | `explain_mutual_fund_performance` | Beginner-friendly per-scheme verdict: is each fund beating or lagging its benchmark |
 | `explain_portfolio_health` | Beginner-friendly read on concentration risk, asset mix, and overall returns vs benchmark |
 
-**Multi-account management — only appears if you've set up the optional Turso backend below**
+**Multi-account management — only appears if you've done Setup 2**
 
 | Tool | What it does |
 |---|---|
@@ -169,7 +274,9 @@ Live-fetched from Fold on every call (not synced to a database) — always refle
 
 ## How it works
 
-Storage is picked automatically at startup, with no flag to remember: if `TURSO_DATABASE_URL` is set (see the optional section below), the server uses Turso; otherwise it defaults to a local SQLite file. Everything below describes the default, zero-config path.
+Storage is picked automatically at startup, with no flag to remember: if you've done Setup 2 (Turso credentials are present), the server uses Turso; otherwise it defaults to a local SQLite file (Setup 1). Everything below describes Setup 1's path first, then what changes for Setup 2.
+
+**Setup 1 (local):**
 
 ```
 Claude Desktop
@@ -190,90 +297,9 @@ fold-mcp/build/index.js      — Node.js process, read-only SQLite access
                               db.sqlite  (upsert by transaction UUID)
 ```
 
-The MCP server only reads from SQLite. All writes go through the Go CLI, which handles auth token refresh automatically before every sync.
+The MCP server only reads from SQLite. All writes go through the Go CLI, which handles auth token refresh automatically before every sync. Investment tools (mutual funds, stocks, EPF, NPS, PPF, fixed deposits) don't touch SQLite at all — each call shells out to `unfold_patched investments --json`, which hits Fold live and returns a fresh snapshot straight to Claude.
 
-Investment tools (mutual funds, stocks, EPF, NPS, PPF, fixed deposits) don't touch SQLite at all — each call shells out to `unfold_patched investments --json`, which hits Fold live and returns a fresh snapshot straight to Claude.
-
----
-
-## Privacy
-
-- By default, everything runs locally. No data is sent to any third-party service.
-- `db.sqlite` is gitignored and never leaves your machine.
-- Auth tokens live at `~/.config/unfold/config.yaml`, scoped to your OS user.
-- If you share a Claude account with others, they cannot see your spending data because MCP servers run locally on each person's own computer.
-- The optional Turso/Render setup below changes these guarantees — see its own Privacy note.
-
----
-
-## Optional: multi-account & remote access (Turso + Render)
-
-Everything above is the whole story for most people. This section is for two specific needs: linking **more than one** Fold account, or reaching your data from **Claude's mobile app or claude.ai in a browser** (not just Claude Desktop/Code on your laptop). Setting this up replaces the local SQLite file with a [Turso](https://turso.tech) (hosted libSQL) database — the same server, just pointed at a different storage backend via environment variables. Skip this entirely if you don't need either of those two things.
-
-**Additional requirements:** a [Turso](https://turso.tech) account (free tier is enough). A [Render](https://render.com) account too, only if you want mobile/browser access.
-
-### 1. Create the Turso database
-
-```bash
-turso db create fold-mcp
-turso db show fold-mcp                       # note the URL
-turso db tokens create fold-mcp               # note the auth token
-turso db shell fold-mcp < fold-mcp/schema/turso.sql
-```
-
-### 2. Configure environment variables
-
-```bash
-cp fold-mcp/.env.example fold-mcp/.env
-```
-
-Fill in `fold-mcp/.env`:
-
-| Variable | Needed for | Value |
-|---|---|---|
-| `TURSO_DATABASE_URL` | Always (this is what switches the server into Turso mode) | from `turso db show` |
-| `TURSO_AUTH_TOKEN` | Always | from `turso db tokens create` |
-| `MCP_SHARED_PASSWORD` | HTTP/mobile/browser only | a password you pick — gates the OAuth sign-in page |
-| `PUBLIC_BASE_URL` | HTTP/mobile/browser only | `http://localhost:3000` locally, or `https://<your-service>.onrender.com` on Render |
-| `PORT` | HTTP/mobile/browser only | `3000` locally; Render sets this automatically |
-
-### 3a. Run it locally, still over stdio (just multi-account, no Render)
-
-You still don't need Render or `MCP_SHARED_PASSWORD`/`PUBLIC_BASE_URL` for this — only the two `TURSO_*` variables are read outside HTTP mode. Point Claude Desktop's config at the same `build/index.js`, but pass the Turso variables through `env` since there's no local file for them to live in otherwise:
-
-```json
-{
-  "mcpServers": {
-    "fold": {
-      "command": "/opt/homebrew/bin/node",
-      "args": ["/absolute/path/to/fold-mcp/fold-mcp/build/index.js"],
-      "env": {
-        "TURSO_DATABASE_URL": "libsql://...",
-        "TURSO_AUTH_TOKEN": "..."
-      }
-    }
-  }
-}
-```
-
-Then in Claude, link an account and sync — there's no `unfold_patched login` step here, it's done through tools instead:
-
-> Add my Fold account with phone number +91XXXXXXXXXX, then send me the OTP prompt
-
-Claude calls `add_fold_account` then `verify_fold_account_otp` once you give it the OTP. Repeat `add_fold_account` for a second phone number to link another account, and use `set_active_fold_account` / the `account` argument on tools to switch between them.
-
-### 3b. Deploy to Render (for Claude mobile / claude.ai)
-
-1. Push this repo (or your fork) to GitHub if you haven't.
-2. In Render: **New → Web Service**, connect the repo, branch `main`. Render will detect the `Dockerfile` automatically — no build/start command needed.
-3. Add the environment variables from the table above (`TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `MCP_SHARED_PASSWORD`, `PUBLIC_BASE_URL` set to your Render URL once you know it — you can redeploy after the first deploy to fill this in).
-4. Deploy. Confirm it's up: `curl https://<your-service>.onrender.com/healthz` should return `{"status":"ok"}`.
-5. In Claude (mobile app or claude.ai): **Settings → Connectors → Add custom connector**, and enter `https://<your-service>.onrender.com/mcp` as the URL. Claude will register itself (DCR) and redirect you to a sign-in page — enter the `MCP_SHARED_PASSWORD` you set above.
-6. From there, ask Claude to add your Fold account the same way as in 3a (`add_fold_account` → OTP → `verify_fold_account_otp`), then sync.
-
-> Free Render web services spin down when idle and take ~30-60s to wake on the first request after a while — expect a slow first message after inactivity.
-
-### How it works (Turso mode)
+**Setup 2 (Turso, optionally + Render):**
 
 ```
 Claude Desktop/Code (stdio)         Claude mobile / claude.ai (HTTPS + OAuth)
@@ -296,14 +322,21 @@ fold-mcp/build/index.js  <-----------------------+
                                 Turso (upsert by fold_account_id + transaction UUID)
 ```
 
-Every tool call resolves which linked Fold account it's for, then reads/writes Turso scoped to that account — the same database backs both the stdio and HTTP entry points.
+Every tool call resolves which linked Fold account it's for, then reads/writes Turso scoped to that account — the same database backs both the stdio and HTTP entry points. Investment tools skip Turso entirely — each call materializes that account's temp config, shells out to `unfold_patched investments --json` for a live snapshot, and returns it directly; nothing is persisted.
 
-Investment tools skip Turso entirely — each call materializes that account's temp config, shells out to `unfold_patched investments --json` for a live snapshot, and returns it directly; nothing is persisted.
+---
 
-### Privacy (Turso mode)
+## Privacy
 
+**Setup 1 (local):**
+- Everything runs locally. No data is sent to any third-party service.
+- `db.sqlite` is gitignored and never leaves your machine.
+- Auth tokens live at `~/.config/unfold/config.yaml`, scoped to your OS user.
+- If you share a Claude account with others, they cannot see your spending data because MCP servers run locally on each person's own computer.
+
+**Setup 2 (Turso, optionally + Render):**
 - Transaction data and Fold auth tokens live in your own Turso database, not a third party's — but it is a cloud database, not your local disk.
-- If deployed to Render, that database is reachable from anywhere Claude can reach the internet; `MCP_SHARED_PASSWORD` plus per-client OAuth tokens are what gate access to it.
+- If deployed to Render, that database is reachable from anywhere Claude can reach the internet; the shared password you set plus per-client OAuth tokens are what gate access to it.
 - Anyone who knows your shared password and connector URL can read your data — treat it like any other account password.
 
 ---
