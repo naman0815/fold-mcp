@@ -40,8 +40,14 @@ export const config = {
     return required("TURSO_AUTH_TOKEN");
   },
 
-  /** Public HTTPS URL of the deployed server, used as the OAuth issuer + redirect validation (Phase 4+). */
+  /**
+   * Public HTTPS URL of the deployed server, used as the OAuth issuer + redirect
+   * validation (Phase 4+). Falls back to RENDER_EXTERNAL_URL, which Render sets
+   * automatically on every web service — so a Render deploy needs no manual
+   * PUBLIC_BASE_URL config at all. Only required explicitly for local HTTP testing
+   * or non-Render hosts.
+   */
   get publicBaseUrl(): string {
-    return required("PUBLIC_BASE_URL");
+    return optional("PUBLIC_BASE_URL") ?? required("RENDER_EXTERNAL_URL");
   },
 } as const;
