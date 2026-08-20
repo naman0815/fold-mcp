@@ -29,6 +29,10 @@ export function getTurso(): Client {
   return turso;
 }
 
+/** No-op — the Turso client connects lazily on first getTurso() call. Exists so
+ * storage/index.ts can call init() uniformly regardless of which backend is active. */
+export async function init(): Promise<void> {}
+
 // ─── Per-call "which Fold account" context ───────────────────────────────────
 const accountStorage = new AsyncLocalStorage<string>();
 

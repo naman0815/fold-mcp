@@ -16,7 +16,7 @@ import crypto from "crypto";
 import express from "express";
 
 import { fileURLToPath } from "url";
-import { runQuery, runQueryManual, runFtsQuery, rebuildFtsIfStale, withAccount } from "./storage/turso.js";
+import { runQuery, runQueryManual, runFtsQuery, rebuildFtsIfStale, withAccount, init as initStorage, backend } from "./storage/index.js";
 import * as accounts from "./accounts.js";
 import { INVESTMENT_TOOL_NAMES, buildInvestmentsToolResult } from "./investments.js";
 import { checkForUpdates } from "./updateCheck.js";
@@ -754,10 +754,14 @@ for (const tool of [
   GET_FIXED_DEPOSITS_TOOL, GET_NET_WORTH_TOOL, GET_MUTUAL_FUND_REFRESH_STATUS_TOOL,
   EXPLAIN_MUTUAL_FUND_PERFORMANCE_TOOL, EXPLAIN_PORTFOLIO_HEALTH_TOOL,
 ]) {
-  (tool.inputSchema.properties as Record<string, unknown>).account = {
-    type: "string",
-    description: ACCOUNT_PARAM_DESCRIPTION,
-  };
+  // Sqlite mode has exactly one implicit account — an `account` argument would be
+  // meaningless noise in every tool's schema, so only add it when it does something.
+  if (backend === "turso") {
+    (tool.inputSchema.properties as Record<string, unknown>).account = {
+      type: "string",
+      description: ACCOUNT_PARAM_DESCRIPTION,
+    };
+  }
 }
 
 // ─── Server ───────────────────────────────────────────────────────────────────
@@ -808,15 +812,33 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     GET_MUTUAL_FUND_REFRESH_STATUS_TOOL,
     EXPLAIN_MUTUAL_FUND_PERFORMANCE_TOOL,
     EXPLAIN_PORTFOLIO_HEALTH_TOOL,
-    LIST_FOLD_ACCOUNTS_TOOL,
-    ADD_FOLD_ACCOUNT_TOOL,
-    VERIFY_FOLD_ACCOUNT_OTP_TOOL,
-    SET_ACTIVE_FOLD_ACCOUNT_TOOL,
+    // Multi-account management only makes sense with the Turso backend — sqlite
+    // mode has exactly one implicit account, so these tools don't apply there.
+    ...(backend === "turso" ? [
+      LIST_FOLD_ACCOUNTS_TOOL,
+      ADD_FOLD_ACCOUNT_TOOL,
+      VERIFY_FOLD_ACCOUNT_OTP_TOOL,
+      SET_ACTIVE_FOLD_ACCOUNT_TOOL,
+    ] : []),
   ],
 }));
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
+    const MULTI_ACCOUNT_TOOL_NAMES = new Set([
+      "list_fold_accounts", "add_fold_account", "verify_fold_account_otp", "set_active_fold_account",
+    ]);
+    if (backend !== "turso" && MULTI_ACCOUNT_TOOL_NAMES.has(request.params.name)) {
+      return {
+        content: [{
+          type: "text",
+          text: `"${request.params.name}" requires the Turso storage backend (multiple linked accounts) — ` +
+            `this server is running in local/sqlite mode with a single account. Set TURSO_DATABASE_URL and ` +
+            `TURSO_AUTH_TOKEN to enable multi-account support.`,
+        }],
+      };
+    }
+
     // ── list_fold_accounts ───────────────────────────────────────────────────
     // Account-management tools run before account resolution — they're how you
     // create the first linked account, so they can't require one to already exist.
@@ -867,8 +889,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     // Every remaining tool operates against one linked Fold account — resolve it
     // once (defaulting to the active account) and make it available to every
-    // runQuery() call below via AsyncLocalStorage.
-    const foldAccountId = await accounts.resolveAccountId(request.params.arguments?.account as string | undefined);
+    // runQuery() call below via AsyncLocalStorage. Sqlite mode has exactly one
+    // implicit account, so there's nothing to look up.
+    const foldAccountId = backend === "turso"
+      ? await accounts.resolveAccountId(request.params.arguments?.account as string | undefined)
+      : "local";
     return await withAccount(foldAccountId, async () => {
     // ── investment tools ────────────────────────────────────────────────────
     if (INVESTMENT_TOOL_NAMES.has(request.params.name)) {
@@ -2086,10 +2111,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 }
 
 // ─── Transport: stdio (Claude Desktop) or HTTP (remote, Claude web/mobile) ──
-// Data lives in Turso (see db.ts) instead of a local db.sqlite file — there's no
-// local database to load at startup either way. The per-account FTS cache (also
-// in db.ts) is built lazily on first use.
+// Storage backend is auto-selected (storage/index.ts): Turso if TURSO_DATABASE_URL
+// is set (connects lazily on first use), otherwise the zero-config local sqlite
+// backend, which needs its one-time init() (loads db.sqlite + builds the FTS index)
+// before any tool call can run.
 async function main() {
+  await initStorage();
+  console.error(`Fold MCP Server v6.0.0 — storage backend: ${backend}`);
+
   if (process.env.MCP_TRANSPORT === "http") {
     await startHttpServer();
   } else {
