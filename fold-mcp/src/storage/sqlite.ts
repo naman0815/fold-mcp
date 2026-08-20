@@ -15,7 +15,7 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 // storage/sqlite.js -> build/storage -> build -> fold-mcp -> repo root
-const dbPath = path.resolve(__dirname, "..", "..", "..", "db.sqlite");
+export const dbPath = path.resolve(__dirname, "..", "..", "..", "db.sqlite");
 
 let SQL: SqlJsStatic | undefined;
 let db: Database | undefined;

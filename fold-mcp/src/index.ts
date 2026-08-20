@@ -155,7 +155,7 @@ function stopKeepAliveIfDone(): void {
   }
 }
 
-/** Run a single unfold_patched sync for [from, to] against one Fold account, then upsert into Turso. */
+/** Run a single unfold_patched sync for [from, to] (accounts.runSync handles the backend-specific write). */
 async function runBatch(accountId: string, from: string, to: string): Promise<string> {
   const { synced } = await accounts.runSync(accountId, from, to);
   return `synced ${synced} row${synced === 1 ? "" : "s"}`;

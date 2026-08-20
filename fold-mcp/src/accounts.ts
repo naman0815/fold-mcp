@@ -6,6 +6,8 @@ import path from "path";
 import { fileURLToPath } from "url";
 import yaml from "js-yaml";
 import { getTurso, loadSqlJsDatabase, invalidateFtsCache } from "./storage/turso.js";
+import { dbPath as sqliteDbPath } from "./storage/sqlite.js";
+import { backend } from "./storage/index.js";
 import type { InvestmentsData } from "./investments.js";
 
 // ─── Paths (same resolution the old index.ts used for the Go binary) ────────
@@ -280,8 +282,38 @@ const UPSERT_SQL = `
 
 const BATCH_SIZE = 200;
 
-/** Runs one unfold_patched sync for [from, to] against this account, then upserts results into Turso. */
+/**
+ * Runs one unfold_patched sync for [from, to]. In sqlite mode this writes directly
+ * to the real local db.sqlite (no temp config, no per-account plumbing — matching
+ * local-mcp's original zero-config CLI invocation) and the storage backend's own
+ * mtime-based reload picks up the change on the next query. In turso mode, syncs to
+ * a scratch sqlite file first, then upserts the rows into Turso scoped to this account.
+ */
 export async function runSync(accountId: string, from: string, to: string): Promise<{ synced: number }> {
+  if (backend !== "turso") {
+    const { code, stderr } = await runCli(
+      ["transactions", "-d", "--db-path", sqliteDbPath, "--since", from, "--till", to],
+      120_000
+    );
+    if (code !== 0) {
+      throw new Error(`Sync failed (${from} → ${to}): ${scrubSecrets(stderr.trim()) || "unknown error"}`);
+    }
+    // No before/after diff available (the CLI writes straight to the real db) —
+    // report the db's total row count so the background sync log is still meaningful.
+    if (!fs.existsSync(sqliteDbPath)) return { synced: 0 };
+    const buf = fs.readFileSync(sqliteDbPath);
+    const localDb = await loadSqlJsDatabase(buf);
+    try {
+      const stmt = localDb.prepare(`SELECT COUNT(*) as cnt FROM transactions`);
+      stmt.step();
+      const { cnt } = stmt.getAsObject() as any;
+      stmt.free();
+      return { synced: cnt ?? 0 };
+    } finally {
+      localDb.close();
+    }
+  }
+
   const account = await getAccountRow(accountId);
   if (!account) throw new Error(`Unknown Fold account id: ${accountId}`);
 
@@ -334,6 +366,18 @@ export async function runSync(accountId: string, from: string, to: string): Prom
 // ledger — so there's no DB sync step, just a live fetch per call via the CLI's
 // `investments --json` bridge (see unfold_cli/cmd/investments.go).
 export async function getInvestments(accountId: string): Promise<InvestmentsData> {
+  if (backend !== "turso") {
+    const { code, stdout, stderr } = await runCli(["investments", "--json"], 60_000);
+    if (code !== 0) {
+      throw new Error(`Failed to fetch investments: ${scrubSecrets(stderr.trim()) || "unknown error"}`);
+    }
+    try {
+      return JSON.parse(stdout.trim());
+    } catch {
+      throw new Error(`Failed to parse investments output: ${stdout.slice(0, 200)}`);
+    }
+  }
+
   const account = await getAccountRow(accountId);
   if (!account) throw new Error(`Unknown Fold account id: ${accountId}`);
 
